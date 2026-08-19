@@ -132,21 +132,24 @@ def test_hot_wall_thickness_is_what_was_solved(design, wall):
     assert first == pytest.approx(cut.hot_wall_mm, abs=2e-3)
 
 
-def test_channels_narrow_rather_than_merge_as_the_spike_closes(design):
+def test_channels_hold_their_width_all_the_way_down_the_spike(design):
     """
-    The pitch shrinks with radius. Unclamped, the channels would overlap near
-    the tip and saw the plug in half; clamped, they taper to nothing instead.
+    The pitch shrinks with radius, so a channel count chosen at the chamber
+    cannot fit round the spike and the width clamp starves the channels below
+    the manufacturing floor. Packing the count at the *narrowest* station
+    instead means the designed width survives everywhere, which is what makes
+    the part both printable and meshable.
     """
     a = design.assembly
     cut = centrebody_channels(a, design.circuits["centrebody"].channel)
-    xs = np.linspace(cut.x_start, cut.x_end, 120)
+    xs = np.linspace(cut.x_start, cut.x_end, 200)
     rs = np.interp(xs, cut.wall_x, cut.wall_r)
     arc = 2.0 * math.pi * rs / cut.n_channels
     width = np.minimum(cut.width_mm, np.maximum(arc - cut.land_mm, 0.0))
-    assert np.all(width <= arc + 1e-9)
-    assert np.all(width >= 0.0)
-    # somewhere on the spike the pitch really does run out
-    assert width.min() < cut.width_mm
+
+    assert np.all(width <= arc + 1e-9), "channels would overlap"
+    assert width.min() == pytest.approx(cut.width_mm, rel=1e-9), \
+        "the clamp bit, so the count was packed at too generous a radius"
 
 
 # --------------------------------------------------------------------------
