@@ -15,17 +15,33 @@
     "comment": "truncate_fraction 1.0 is the ideal full spike. Real engines truncate hard; 0.20-0.30 keeps most of the performance."
   },
 
+  "chamber": {
+    "contraction_ratio": 3.0,
+    "chamber_length_mm": 18.0,
+    "converging_length_mm": 14.0,
+    "comment": "Geometry of the annular chamber, not its combustion. contraction_ratio is A_chamber/A_throat and sets the chamber outer radius. converging_length_mm is the axial run over which the duct contracts to the throat; too short and the cowl wall turns sharply, too long and the engine grows for nothing."
+  },
+
   "geometry": {
     "voxel_size_mm": 0.2,
-    "cowl_thickness_mm": 3.0,
-    "cowl_length_mm": 12.0,
-    "base_plate_thickness_mm": 4.0,
-    "comment": "voxel_size_mm is the resolution of the whole model. Halving it multiplies memory by ~8. Start coarse."
+    "wall_thickness_mm": 2.0,
+    "lip_thickness_mm": 0.8,
+    "base_cap_thickness_mm": 3.0,
+    "head_thickness_mm": 4.0,
+    "flange_width_mm": 8.0,
+    "comment": "voxel_size_mm is the resolution of the whole model. Halving it multiplies memory by ~8. Start coarse. wall_thickness_mm hollows the centrebody and sets the cowl shell; the cavity is an eroded offset so at the spike shoulder the wall comes out slightly thicker, never thinner."
+  },
+
+  "mesh": {
+    "theta_steps": 180,
+    "simplify_tolerance_mm": 0.005,
+    "comment": "Used only by the Python STL exporter in validate/mesh_export.py, which is the fallback path for machines without the PicoGK runtime. The C# model voxelises instead and ignores this section."
   },
 
   "output": {
     "stl_dir": "out",
     "export_spike": true,
-    "export_cowl": true
+    "export_cowl": true,
+    "export_head": true
   }
 }

@@ -1,10 +1,13 @@
 //
-// Turns the contour into voxel geometry using PicoGK + LEAP 71 ShapeKernel.
+// Turns the assembly profiles into voxel geometry using PicoGK + LEAP 71
+// ShapeKernel.
 //
-// Note what is NOT here: no sketches, no extrudes, no feature tree. The spike is
-// a surface of revolution whose radius is a *function*, evaluated by the kernel
-// at whatever resolution the voxel field demands. That function-first mindset is
-// the whole point of the computational engineering approach.
+// Note what is NOT here: no sketches, no extrudes, no feature tree, and no
+// physics. Every part is a surface of revolution whose radius is a *function*,
+// evaluated by the kernel at whatever resolution the voxel field demands. The
+// functions themselves come from EngineAssembly; this file only sweeps them.
+//
+// Model x maps to PicoGK Z. Lengths stay in mm throughout.
 //
 
 using System.Numerics;
@@ -20,63 +23,104 @@ namespace Leap71
 
         public static class SpikeGeometry
         {
-            /// <summary>The plug / centrebody, as a solid of revolution.</summary>
-            public static Voxels voxBuildSpike(PlugContour oContour, EngineSpec oSpec)
+            private const uint nLengthSteps = 600;
+
+            /// <summary>
+            /// Solid of revolution between two axial stations, radius given as a
+            /// function of x.
+            ///
+            /// SetRadius resets the length steps internally, so it has to be
+            /// called before SetLengthSteps and not after. Called the other way
+            /// round the sweep quietly drops to the 500-step default and the
+            /// shoulder loses definition.
+            /// </summary>
+            private static Voxels voxRevolve(
+                double fX0, double fX1, Func<double, double> fnRadiusAtX)
             {
-                LocalFrame oFrame = new LocalFrame(new Vector3(0, 0, 0), Vector3.UnitZ);
+                float fLength = (float)(fX1 - fX0);
+                LocalFrame oFrame = new LocalFrame(
+                    new Vector3(0, 0, (float)fX0), Vector3.UnitZ);
 
-                BaseCylinder oSpike = new BaseCylinder(
-                    oFrame,
-                    (float)oContour.LengthMm,
-                    (float)oContour.ExitRadiusMm);
-
-                // radius as a function of normalised station along the axis
-                oSpike.SetLengthSteps(600);
-                oSpike.SetRadius(new SurfaceModulation(
-                    new LineModulation(fRatio => (float)oContour.RadiusAtLengthRatio(fRatio))));
-
-                return oSpike.voxConstruct();
+                BaseCylinder oShape = new BaseCylinder(oFrame, fLength, 1f);
+                oShape.SetRadius(new SurfaceModulation(new LineModulation(
+                    fRatio => (float)fnRadiusAtX(fX0 + fRatio * (fX1 - fX0)))));
+                oShape.SetLengthSteps(nLengthSteps);
+                return oShape.voxConstruct();
             }
 
             /// <summary>
-            /// The outer cowl ring that forms the other side of the annular throat.
-            /// Deliberately simple: a straight ring at the lip radius. The real
-            /// engineering, injector, manifold, cooling, is not modelled here.
+            /// The centrebody: cylindrical through the chamber, then the
+            /// Angelino spike, hollowed and capped behind the truncation.
+            ///
+            /// Built as solid minus cavity rather than as a pipe. The voxel
+            /// erosion the kernel does here is a true distance-field offset, so
+            /// unlike the polyline offset in the Python reference it cannot
+            /// fold over at the shoulder and needs no pruning. The two agree on
+            /// the flow surface exactly and differ by a fraction of a
+            /// millimetre inside the shoulder, where the Python is the more
+            /// conservative of the two.
             /// </summary>
-            public static Voxels voxBuildCowl(PlugContour oContour, EngineSpec oSpec)
+            public static Voxels voxBuildCentrebody(EngineAssembly oAsm)
             {
-                float fLipRadius = (float)oContour.ExitRadiusMm;
-                float fThickness = oSpec.Geometry.CowlThicknessMm;
-                float fLength    = oSpec.Geometry.CowlLengthMm;
+                Voxels voxSolid = voxRevolve(
+                    oAsm.HeadXMm, oAsm.TipXMm, oAsm.CentrebodyRadiusAtX);
 
-                // sits upstream of x = 0 so the lip lands on the throat station
-                LocalFrame oFrame = new LocalFrame(new Vector3(0, 0, -fLength), Vector3.UnitZ);
+                // start the cavity ahead of the head face so the bore cuts
+                // clean through it and powder has somewhere to go
+                Voxels voxCavity = voxRevolve(
+                    oAsm.HeadXMm - 1.0, oAsm.CavityEndXMm, oAsm.CavityRadiusAtX);
 
-                BasePipe oCowl = new BasePipe(
-                    oFrame,
-                    fLength,
-                    fLipRadius,
-                    fLipRadius + fThickness);
-
-                oCowl.SetLengthSteps(120);
-                return oCowl.voxConstruct();
+                return voxSolid - voxCavity;
             }
 
             /// <summary>
-            /// A flat mounting plate behind the throat so the demonstrator has
-            /// something to bolt to and a flat face to print from.
+            /// The cowl: outer side of the annular chamber and of the throat,
+            /// ending at the lip. Downstream of the lip an aerospike has no
+            /// outer wall, which is the entire point of the architecture.
             /// </summary>
-            public static Voxels voxBuildBasePlate(PlugContour oContour, EngineSpec oSpec)
+            public static Voxels voxBuildCowl(EngineAssembly oAsm)
             {
-                float fThickness = oSpec.Geometry.BasePlateThicknessMm;
-                float fRadius    = (float)oContour.ExitRadiusMm + oSpec.Geometry.CowlThicknessMm;
+                double fX0 = oAsm.HeadXMm;
+                double fX1 = oAsm.Contour.LipXMm;
+                float fLength = (float)(fX1 - fX0);
 
                 LocalFrame oFrame = new LocalFrame(
-                    new Vector3(0, 0, -oSpec.Geometry.CowlLengthMm - fThickness),
-                    Vector3.UnitZ);
+                    new Vector3(0, 0, (float)fX0), Vector3.UnitZ);
 
-                BaseCylinder oPlate = new BaseCylinder(oFrame, fThickness, fRadius);
-                return oPlate.voxConstruct();
+                BasePipe oPipe = new BasePipe(oFrame, fLength, 1f, 2f);
+                oPipe.SetRadius(
+                    new SurfaceModulation(new LineModulation(
+                        fRatio => (float)oAsm.CowlInnerRadiusAtX(fX0 + fRatio * (fX1 - fX0)))),
+                    new SurfaceModulation(new LineModulation(
+                        fRatio => (float)oAsm.CowlOuterRadiusAtX(fX0 + fRatio * (fX1 - fX0)))));
+                oPipe.SetLengthSteps(nLengthSteps);
+                return oPipe.voxConstruct();
+            }
+
+            /// <summary>
+            /// The head closure and mounting flange: one annular disc that caps
+            /// the chamber, butts against both the cowl and the centrebody, and
+            /// gives the demonstrator a flat face to print from and bolt to.
+            /// It is an annulus rather than a plate so the centrebody bore
+            /// stays open.
+            ///
+            /// Deliberately blank. This is not an injector: no orifice pattern,
+            /// no manifolding, no propellant routing. See CLAUDE.md.
+            /// </summary>
+            public static Voxels voxBuildHead(EngineAssembly oAsm)
+            {
+                float fThickness = (float)oAsm.Spec.Geometry.HeadThicknessMm;
+                LocalFrame oFrame = new LocalFrame(
+                    new Vector3(0, 0, (float)(oAsm.HeadXMm - fThickness)), Vector3.UnitZ);
+
+                BasePipe oDisc = new BasePipe(
+                    oFrame,
+                    fThickness,
+                    (float)oAsm.BoreRadiusMm,
+                    (float)oAsm.FlangeRadiusMm);
+
+                oDisc.SetLengthSteps(60);
+                return oDisc.voxConstruct();
             }
         }
     }
