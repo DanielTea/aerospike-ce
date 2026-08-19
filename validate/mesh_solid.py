@@ -610,6 +610,13 @@ def feed_ports(a: EngineAssembly, cut: ChannelCut, diameter_mm: float | None = N
     # channel area so it is not the restriction.
     d = diameter_mm if diameter_mm is not None else max(1.2, 1.5 * cut.height_mm)
     x_at = cut.x_end - inset_mm
+    if not cut.outward:
+        # The spike ports draw from the central bore, so they have to sit where
+        # the bore still reaches. The cavity closes in a self-supporting cone
+        # short of the truncation, and a port aft of that opens into solid metal:
+        # a fuel path that simply stops, with nothing in a watertightness or
+        # topology check to notice.
+        x_at = min(x_at, float(np.asarray(a.cavity_x).max()) - 2.0)
     wall = float(np.interp(x_at, cut.wall_x, cut.wall_r))
     if cut.outward:
         r_lo = wall + cut.hot_wall_mm
