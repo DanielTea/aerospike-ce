@@ -62,6 +62,8 @@ def solve_startup(
     duration: float = 2.0,
     nodes: int = 41,
     safety: float = 0.25,
+    steps_target: int = 4000,
+    explicit: bool = False,
 ) -> StartupResult:
     """
     March the hot wall through startup at one station.
@@ -71,8 +73,18 @@ def solve_startup(
     does. Negative means the gas arrives first, and is the case worth looking at
     before writing a valve sequence.
 
-    Explicit conduction, so the step is bounded by the stability limit
-    dt < dx^2 / (2 alpha); `safety` is the fraction of that used.
+    Implicit conduction (backward Euler), solved on the tridiagonal system each
+    step. The scheme matters more than it looks: explicit marching is bounded by
+    dt < dx^2 / (2 alpha), and on a 0.3 mm wall at forty nodes that is 80
+    nanoseconds -- twenty-four million steps for a two-second transient, and
+    around a minute of wall clock for a result that is wanted hundreds of times
+    inside an optimiser. Backward Euler is unconditionally stable, so the step
+    is set by how finely the ramp needs resolving rather than by stability, and
+    the same answer arrives about a thousand times sooner.
+
+    Pass `explicit=True` for the old marching scheme. It is kept because the two
+    agreeing is what shows the implicit solve is right, not because it is
+    useful; `safety` applies only to it.
     """
     m = solution.material
     if station is None:
@@ -81,7 +93,12 @@ def solve_startup(
     t_hot = solution.channel.hot_wall_mm * 1e-3
     dx = t_hot / (nodes - 1)
     alpha = m.conductivity / (m.density * 385.0)      # cp of the alloy, J/(kg K)
-    dt = safety * dx * dx / (2.0 * alpha)
+    dt_stable = safety * dx * dx / (2.0 * alpha)
+    if explicit:
+        dt = dt_stable
+    else:
+        # resolve the ramp finely, and never take a step coarser than that
+        dt = min(duration / steps_target, ramp_time / 200.0)
     steps = max(2, int(duration / dt))
 
     q_steady = float(solution.heat_flux[station])
@@ -97,30 +114,62 @@ def solve_startup(
     tc = np.empty(steps)
     qq = np.empty(steps)
 
-    for k in range(steps):
-        t = k * dt
-        gas_frac = min(max(t / ramp_time, 0.0), 1.0)
-        cool_frac = min(max((t + coolant_lead) / ramp_time, 0.0), 1.0)
+    lam = alpha * dt / (dx * dx)
+    k_w = m.conductivity
 
-        hg = h_gas * gas_frac
-        hc = h_cool * cool_frac
-        q_in = hg * (t_aw - temp[0])
-        q_out = hc * (temp[-1] - t_cool)
+    if explicit:
+        for k in range(steps):
+            t = k * dt
+            hg = h_gas * min(max(t / ramp_time, 0.0), 1.0)
+            hc = h_cool * min(max((t + coolant_lead) / ramp_time, 0.0), 1.0)
+            q_in = hg * (t_aw - temp[0])
+            q_out = hc * (temp[-1] - t_cool)
 
-        new = temp.copy()
-        new[1:-1] = temp[1:-1] + alpha * dt / (dx * dx) * (
-            temp[2:] - 2.0 * temp[1:-1] + temp[:-2])
-        # faces: half-cell energy balance
-        new[0] = temp[0] + 2.0 * alpha * dt / (dx * dx) * (
-            temp[1] - temp[0] + q_in * dx / m.conductivity)
-        new[-1] = temp[-1] + 2.0 * alpha * dt / (dx * dx) * (
-            temp[-2] - temp[-1] - q_out * dx / m.conductivity)
-        temp = new
+            new = temp.copy()
+            new[1:-1] = temp[1:-1] + lam * (temp[2:] - 2.0 * temp[1:-1] + temp[:-2])
+            new[0] = temp[0] + 2.0 * lam * (temp[1] - temp[0] + q_in * dx / k_w)
+            new[-1] = temp[-1] + 2.0 * lam * (temp[-2] - temp[-1] - q_out * dx / k_w)
+            temp = new
 
-        times[k] = t
-        tg[k] = temp[0]
-        tc[k] = temp[-1]
-        qq[k] = q_in
+            times[k] = t
+            tg[k] = temp[0]
+            tc[k] = temp[-1]
+            qq[k] = q_in
+    else:
+        from scipy.linalg import solve_banded
+
+        # Tridiagonal system in banded form: rows are super, main, sub.
+        # Interior rows never change; only the two faces move with the ramp.
+        ab = np.zeros((3, nodes))
+        ab[0, 2:] = -lam                      # super-diagonal, rows 1..n-2
+        ab[1, 1:-1] = 1.0 + 2.0 * lam
+        ab[2, :-2] = -lam                     # sub-diagonal, rows 1..n-2
+        rhs = np.empty(nodes)
+
+        for k in range(steps):
+            t = k * dt
+            hg = h_gas * min(max(t / ramp_time, 0.0), 1.0)
+            hc = h_cool * min(max((t + coolant_lead) / ramp_time, 0.0), 1.0)
+
+            # gas face: T0 (1 + 2L + 2L hg dx/k) - 2L T1 = T0^n + 2L hg Taw dx/k
+            bg = 2.0 * lam * hg * dx / k_w
+            ab[1, 0] = 1.0 + 2.0 * lam + bg
+            ab[0, 1] = -2.0 * lam
+            rhs[0] = temp[0] + bg * t_aw
+
+            rhs[1:-1] = temp[1:-1]
+
+            bc = 2.0 * lam * hc * dx / k_w
+            ab[1, -1] = 1.0 + 2.0 * lam + bc
+            ab[2, -2] = -2.0 * lam
+            rhs[-1] = temp[-1] + bc * t_cool
+
+            temp = solve_banded((1, 1), ab, rhs)
+
+            times[k] = t
+            tg[k] = temp[0]
+            tc[k] = temp[-1]
+            qq[k] = hg * (t_aw - temp[0])
 
     peak = float(tg.max())
     steady = float(solution.t_wall_gas[station])
