@@ -98,6 +98,26 @@ namespace Leap71
             }
 
             /// <summary>
+            /// A part built from its signed distance function, with cooling
+            /// channels and injector orifices already subtracted.
+            ///
+            /// PicoGK renders any bounded implicit straight into voxels, so the
+            /// distance functions in CooledGeometry.cs -- the same ones the
+            /// Python mesher uses -- go to the kernel unchanged. The
+            /// alternative, booleaning several hundred individual channel
+            /// solids, would be slower and would need a second formulation of
+            /// the same geometry to keep in step with the first.
+            ///
+            /// Voxel size has to resolve the channel. A 0.4 mm channel at a
+            /// 0.4 mm voxel is one voxel wide and will come out broken; budget
+            /// three voxels across the narrowest feature.
+            /// </summary>
+            public static Voxels voxBuildCooledPart(CooledPart oPart)
+            {
+                return new Voxels(oPart);
+            }
+
+            /// <summary>
             /// The head closure and mounting flange: one annular disc that caps
             /// the chamber, butts against both the cowl and the centrebody, and
             /// gives the demonstrator a flat face to print from and bolt to.
