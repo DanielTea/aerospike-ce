@@ -96,7 +96,7 @@ def build_plan(spec: dict, design=None) -> dict:
         plan["parts"][name] = {
             "profile": _points(profile.x, profile.r),
             "channels": [], "ports": [], "holes": [],
-            "bosses": [], "lugs": [], "plenums": [],
+            "bosses": [], "lugs": [], "plenums": [], "ribs": [], "legs": [],
         }
 
     # ---- cooling channels and their feed ports ----
@@ -155,6 +155,28 @@ def build_plan(spec: dict, design=None) -> dict:
                 "count": int(h.count), "x_start_mm": _f(h.x_start),
                 "x_end_mm": _f(h.x_end), "phase_rad": _f(h.phase)})
 
+    # ---- external shell: stiffening ribs and splayed legs ----
+    from shell_ref import shell_features
+    shell, _, _ = shell_features(d)
+    for part, feats in shell.items():
+        for rb in feats["ribs"]:
+            plan["parts"][part]["ribs"].append({
+                "base": _points(rb.base_x, rb.base_r),
+                "count": int(rb.count), "height_mm": _f(rb.height_mm),
+                "root_width_mm": _f(rb.root_width_mm),
+                "flank_deg": _f(rb.flank_deg),
+                "x_start_mm": _f(rb.x_start), "x_end_mm": _f(rb.x_end),
+                "outward": bool(rb.outward), "phase_rad": _f(rb.phase)})
+        for lg in feats["legs"]:
+            plan["parts"][part]["legs"].append({
+                "count": int(lg.count), "x_top_mm": _f(lg.x_top),
+                "r_top_mm": _f(lg.r_top), "x_foot_mm": _f(lg.x_foot),
+                "r_foot_mm": _f(lg.r_foot),
+                "thickness_mm": _f(lg.thickness_mm),
+                "half_width_deg": _f(lg.half_width_deg),
+                "pad_radius_mm": _f(lg.pad_radius_mm),
+                "phase_rad": _f(lg.phase)})
+
     return plan
 
 
@@ -199,7 +221,8 @@ def main() -> None:
     print(f"wrote {args.out}  ({os.path.getsize(args.out) / 1024:.0f} kB)")
     for name, part in plan["parts"].items():
         bits = [f"{len(part['profile']['x'])} profile pts"]
-        for k in ("channels", "ports", "holes", "bosses", "lugs", "plenums"):
+        for k in ("channels", "ports", "holes", "bosses", "lugs", "plenums",
+                  "ribs", "legs"):
             if part[k]:
                 bits.append(f"{len(part[k])} {k}")
         print(f"  {name:11s} {', '.join(bits)}")
