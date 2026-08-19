@@ -18,6 +18,32 @@ claim a part "looks right". Verify through the channels you actually have:
 
 If a change is not covered by one of these, add coverage before making it.
 
+## Python owns the physics, C# owns the voxels
+
+There is one implementation of every number and it lives in `validate/`. The C#
+reads a build plan -- profiles as point lists, features as their parameters, all
+in millimetres -- and voxelises it. It cannot disagree about geometry because it
+is never told how to derive any.
+
+This replaced a mirror. Two thirds of the C# used to be a hand-kept copy of the
+Python maths, and divergence was named right here as the failure mode the
+structure existed to prevent. The mirror never once caught an error in the
+Python. Every bug the pairing found was a bug in the copy: a `SetRadius` call
+that silently reset the step count, a CSV writing commas as both decimal point
+and delimiter, a distance function costing twenty-two billion operations a part.
+It charged a port every time the physics moved and defended against a failure
+that never happened.
+
+So do not put physics back into `model/`. If the C# needs a number, add it to
+the plan. If it needs a *property* to make sense of a field, that field is on
+the wrong side of the seam, and `test_build_plan.py` fails the build for exactly
+that.
+
+```bash
+python validate/build_plan.py --spec spec/regen.json --out out/plan.json
+dotnet run --project model -- out/plan.json --exit-when-done
+```
+
 ## Order of work
 
 The Python in `validate/` is the source of truth for the physics. The C# in
@@ -30,8 +56,9 @@ The Python in `validate/` is the source of truth for the physics. The C# in
    `python plot_engine.py`, then `python mesh_export.py`.
 5. **Actually look at the PNGs.** Read the images. Do not skip this.
 6. Only then port the change to `model/`.
-7. `dotnet run --project model -- spec/demo.json` and compare the logged numbers
-   against the Python output. They must agree to at least four significant figures.
+7. `python build_plan.py`, then `dotnet run --project model -- out/plan.json`.
+   There is nothing left to cross-check: the C# does not compute numbers, it
+   reads them.
 
 Step 7 needs the PicoGK native runtime. Without it you can still `dotnet build`
 the project, which compile-checks everything, and cross-check the maths headless:
@@ -67,19 +94,11 @@ the two is the failure mode this structure exists to prevent.
 | `validate/plot_engine.py` | assembly PNG + area schedule | your eyes on the engine |
 | `validate/plot_cooled.py` | section views through the field | your eyes on the channels |
 | `validate/export_cooled.py` | cooled STLs + topology check | |
-| `model/GasDynamics.cs` | isentropic + Prandtl-Meyer | mirror of the Python |
-| `model/PlugContour.cs` | contour construction | mirror of the Python |
-| `model/EngineAssembly.cs` | assembly profiles | mirror of `engine_ref.py` |
-| `model/Combustion.cs` | chamber conditions | mirror of `combustion_ref.py` |
-| `model/Injector.cs` | element sizing | mirror of `injector_ref.py` |
-| `model/Cooling.cs` | cooling solve, film, coatings, search | mirror of `cooling_ref.py` |
-| `model/Structural.cs` | thermal strain and cycle life | mirror of `structural_ref.py` |
-| `model/Transient.cs` | startup conduction | mirror of `transient_ref.py` |
-| `model/Stability.cs` | chamber acoustics | mirror of `stability_ref.py` |
-| `model/PlugFlow.cs` | plug surface pressure | mirror of `plug_flow_ref.py` |
-| `model/CooledGeometry.cs` | SDFs for channels and orifices | mirror of `mesh_solid.py` |
-| `model/SpikeGeometry.cs` | PicoGK voxel assembly | geometry only, no physics |
-| `model/Program.cs` | orchestration, logging, export | no engineering logic |
+| `validate/build_plan.py` | writes the plan C# reads | the seam; shapes only |
+| `model/BuildPlan.cs` | reads the plan | refuses a version it does not know |
+| `model/CooledGeometry.cs` | SDFs for every feature | mirror of `mesh_solid.py` |
+| `model/SpikeGeometry.cs` | hands an implicit to PicoGK | forty lines, and rightly so |
+| `model/Program.cs` | read plan, voxelise, export | no engineering logic |
 | `out/` | generated artifacts | never commit, never hand-edit |
 
 Physics never leaks into `SpikeGeometry.cs`. Geometry never leaks into
