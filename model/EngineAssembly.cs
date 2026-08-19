@@ -38,6 +38,15 @@ namespace AerospikeCE
         public double[] OuterWallR { get; }
         public double[] CowlOuterX { get; }   // cowl outer shell
         public double[] CowlOuterR { get; }
+
+        /// <summary>
+        /// Shortest distance from a point to a polyline, segment-wise.
+        /// Public because the geometry side needs it to measure wall thickness
+        /// perpendicular to a sloped surface rather than radially.
+        /// </summary>
+        public static double DistanceToPolylinePublic(double px, double pr,
+                                                      double[] x, double[] r)
+            => DistanceToPolyline(px, pr, x, r);
         public double[] CavityX { get; }      // centrebody internal cavity
         public double[] CavityR { get; }
 
@@ -51,6 +60,35 @@ namespace AerospikeCE
         public double BoreRadiusMm { get; }
         public double TipXMm { get; }
         public double CavityEndXMm { get; }
+
+        /// <summary>
+        /// Closed meridional profiles, one per part, mirroring the Profile
+        /// objects in engine_ref.py. Revolved about the axis each is a solid.
+        /// </summary>
+        public (double[] x, double[] r) CentrebodyProfile()
+        {
+            var x = new List<double>(InnerWallX);
+            var r = new List<double>(InnerWallR);
+            x.Add(TipXMm); r.Add(0.0);              // base face to the axis
+            x.Add(CavityEndXMm); r.Add(0.0);        // forward along the axis
+            for (int i = CavityX.Length - 1; i >= 0; i--) { x.Add(CavityX[i]); r.Add(CavityR[i]); }
+            return (x.ToArray(), r.ToArray());      // head face closes implicitly
+        }
+
+        public (double[] x, double[] r) CowlProfile()
+        {
+            var x = new List<double>(OuterWallX);
+            var r = new List<double>(OuterWallR);
+            for (int i = CowlOuterX.Length - 1; i >= 0; i--) { x.Add(CowlOuterX[i]); r.Add(CowlOuterR[i]); }
+            return (x.ToArray(), r.ToArray());
+        }
+
+        public (double[] x, double[] r) HeadProfile()
+        {
+            double x0 = HeadXMm - Spec.Geometry.HeadThicknessMm;
+            return (new[] { x0, HeadXMm, HeadXMm, x0 },
+                    new[] { BoreRadiusMm, BoreRadiusMm, FlangeRadiusMm, FlangeRadiusMm });
+        }
 
         public double OverallLengthMm => TipXMm - (HeadXMm - Spec.Geometry.HeadThicknessMm);
         public double OverallRadiusMm => FlangeRadiusMm;
@@ -373,6 +411,71 @@ namespace AerospikeCE
         public double CowlInnerRadiusAtX(double x) => Interp(OuterWallX, OuterWallR, x);
         public double CowlOuterRadiusAtX(double x) => Interp(CowlOuterX, CowlOuterR, x);
         public double CavityRadiusAtX(double x) => Interp(CavityX, CavityR, x);
+
+        /// <summary>
+        /// Local flow state along one cooled wall: x, r, A/A_t and Mach.
+        ///
+        /// Area ratio is measured off the built geometry by the same
+        /// shortest-gap frustum used to prove the duct chokes at the throat, so
+        /// the thermal model and the geometry check cannot drift apart. Mach
+        /// comes from the area ratio on the subsonic branch upstream of the
+        /// throat; on the spike the contour's own Mach values are used, since
+        /// inverting the area ratio there would discard the better answer.
+        /// </summary>
+        public (double[] x, double[] r, double[] areaRatio, double[] mach) WallFlowState(
+            string wall, double gamma, int n = 240)
+        {
+            double aT = Contour.ThroatAreaMm2;
+
+            // measured area along the cowl wall
+            var ox = new double[n];
+            var oar = new double[n];
+            for (int i = 0; i < n; i++)
+            {
+                int k = (int)((double)i / (n - 1) * (OuterWallX.Length - 1));
+                double px = OuterWallX[k], pr = OuterWallR[k];
+                double dBest = double.MaxValue, rAt = 0.0;
+                for (int j = 0; j < InnerWallX.Length; j++)
+                {
+                    double dx = InnerWallX[j] - px, dr = InnerWallR[j] - pr;
+                    double d = Math.Sqrt(dx * dx + dr * dr);
+                    if (d < dBest) { dBest = d; rAt = InnerWallR[j]; }
+                }
+                ox[i] = px;
+                oar[i] = Math.PI * (pr + rAt) * dBest / aT;
+            }
+
+            if (wall == "cowl")
+            {
+                var orr = new double[n];
+                var mach = new double[n];
+                for (int i = 0; i < n; i++)
+                {
+                    orr[i] = Interp(OuterWallX, OuterWallR, ox[i]);
+                    mach[i] = GasDynamics.MachFromAreaRatioSubsonic(Math.Max(oar[i], 1.0), gamma);
+                }
+                return (ox, orr, oar, mach);
+            }
+
+            if (wall != "centrebody")
+                throw new ArgumentException($"unknown wall: {wall}");
+
+            int nSpike = Contour.X.Length;
+            int nUp = InnerWallX.Length - nSpike;
+            var ar = new double[InnerWallX.Length];
+            var mc = new double[InnerWallX.Length];
+            for (int i = 0; i < nUp; i++)
+            {
+                ar[i] = Interp(ox, oar, InnerWallX[i]);
+                mc[i] = GasDynamics.MachFromAreaRatioSubsonic(Math.Max(ar[i], 1.0), gamma);
+            }
+            for (int i = 0; i < nSpike; i++)
+            {
+                mc[nUp + i] = Contour.Mach[i];
+                ar[nUp + i] = GasDynamics.AreaRatio(Contour.Mach[i], gamma);
+            }
+            return (InnerWallX, InnerWallR, ar, mc);
+        }
 
         /// <summary>
         /// Flow area along the duct, measured from the built geometry rather
