@@ -15,8 +15,8 @@
   },
 
   "chamber": {
-    "contraction_ratio": 3.0,
-    "chamber_length_mm": 45.0,
+    "contraction_ratio": 6.0,
+    "chamber_length_mm": 122.0,
     "converging_length_mm": 35.0
   },
 
@@ -42,11 +42,37 @@
     "ambient_pressure_pa": 101325.0
   },
 
+  "film": {
+    "fuel_fraction": 0.08,
+    "slot_height_mm": 0.5,
+    "combustion_efficiency": 0.5,
+    "comment": "Fuel injected along the wall at the head end. Not free: it carries mass through the nozzle without burning at the design mixture ratio, so it is charged at combustion_efficiency and shows up as lost specific impulse. It is what lets the chamber be long enough for a sane L* and still be coolable."
+  },
+
+  "coating": {
+    "thickness_mm": 0.0,
+    "conductivity": 1.0,
+    "max_surface_temp_k": 1600.0,
+    "comment": "Yttria-stabilised zirconia if enabled. A tenth of a millimetre is worth three millimetres of copper thermally, but the coating surface then runs far hotter than the metal and spalls if pushed past max_surface_temp_k. Off by default."
+  },
+
+  "startup": {
+    "ramp_time_s": 0.30,
+    "coolant_lead_s": 0.20,
+    "comment": "coolant_lead_s is how far ahead of the gas the coolant is established. Negative means the gas arrives first, which on this engine overshoots the wall limit by hundreds of kelvin. This is a valve sequencing requirement, not a preference."
+  },
+
+  "structure": {
+    "required_cycles": 100.0,
+    "comment": "The hot wall is expected to exceed yield every firing; regen chambers all do. Life, not elasticity, is the criterion."
+  },
+
   "cooling": {
     "materials": ["grcop42", "inconel718"],
     "min_channel_width_mm": 0.4,
+    "min_hot_wall_mm": 0.7,
     "max_pressure_drop_fraction": 0.5,
-    "comment": "The two circuits run in parallel off the fuel feed. The split is NOT an input: engine_design.py measures each circuit's heat load first and divides the fuel in that ratio, because the centrebody carries both the chamber wall and the whole plug surface and an even split starves it."
+    "comment": "min_hot_wall_mm is the constraint that matters most. Left free the search picks 0.3 mm, because the hot wall is the largest thermal resistance in the stack; a third of a millimetre between 3400 K gas and cryogenic methane is not something a powder-bed machine holds, and it is too thin to inspect. 0.7 mm still leaves over 100 K of margin. The two circuits run in parallel off the fuel feed. The split is NOT an input: engine_design.py measures each circuit's heat load first and divides the fuel in that ratio, because the centrebody carries both the chamber wall and the whole plug surface and an even split starves it."
   },
 
   "injector": {

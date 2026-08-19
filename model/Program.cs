@@ -74,6 +74,9 @@ namespace AerospikeCE
 
             InjectorDesign? oInjector = BuildInjector(oAsm, oChamber, oSpec);
             var oCircuits = BuildCooling(oAsm, oContour, oChamber, oSpec);
+            CheckStructureAndStartup(oAsm, oChamber, oSpec, oCircuits);
+            CheckStability(oAsm, oChamber, oSpec, oInjector);
+            LogAltitudeCompensation(oContour, oChamber);
 
             // ---- geometry ----
             var oChannelsCowl = new List<ChannelCut>();
@@ -196,6 +199,24 @@ namespace AerospikeCE
             EngineAssembly a, PlugContour c, ChamberConditions ch, EngineSpec spec)
         {
             double dt = 2.0 * c.ThroatSlantLengthMm;   // hydraulic diameter of the slot
+
+            FilmSpec? film = spec.Film.FuelFraction > 0.0
+                ? new FilmSpec
+                {
+                    FuelFraction = spec.Film.FuelFraction,
+                    InjectXMm = a.HeadXMm,
+                    SlotHeightMm = spec.Film.SlotHeightMm,
+                }
+                : null;
+            CoatingSpec? coating = spec.Coating.ThicknessMm > 0.0
+                ? new CoatingSpec
+                {
+                    ThicknessMm = spec.Coating.ThicknessMm,
+                    Conductivity = spec.Coating.Conductivity,
+                    MaxSurfaceTemp = spec.Coating.MaxSurfaceTempK,
+                }
+                : null;
+
             var reference = new ChannelSpec
             {
                 NChannels = 200, WidthMm = 0.4, HeightMm = 0.6, LandMm = 0.4, HotWallMm = 0.3,
@@ -208,7 +229,7 @@ namespace AerospikeCE
                 var (wx, wr, war, wm) = a.WallFlowState(wall, ch.Propellant.Gamma);
                 var sol = Cooling.Solve(ch, wx, wr, war, wm, reference,
                                         Cooling.Materials[spec.Cooling.Materials[0]],
-                                        dt, dt, 1.0);
+                                        dt, dt, 1.0, null, film, coating);
                 load[wall] = sol.TotalHeat;
             }
 
@@ -227,7 +248,10 @@ namespace AerospikeCE
                 var (wx, wr, war, wm) = a.WallFlowState(wall, ch.Propellant.Gamma);
                 var (best, all) = Cooling.Search(
                     ch, wx, wr, war, wm, dt, dt, rRef, spec.Cooling.Materials,
-                    share, spec.Cooling.MaxPressureDropFraction);
+                    share, spec.Cooling.MaxPressureDropFraction, 80,
+                    spec.Cooling.MinChannelWidthMm, spec.Cooling.MinHotWallMm,
+                    spec.Geometry.WallThicknessMm - spec.Cooling.BackWallMm,
+                    film, coating);
 
                 result[wall] = best;
                 if (best is null)
@@ -286,6 +310,97 @@ namespace AerospikeCE
                         "minimum duct area equals the throat area");
             AssertClose(fMinX, c.LipXMm, 0.05,
                         "the choke point is at the throat, not upstream of it");
+        }
+
+        /// <summary>
+        /// Thermal strain and startup, per circuit.
+        ///
+        /// Both are life-or-death checks that the steady thermal solution says
+        /// nothing about: the wall yields every firing and its life is set by
+        /// how much plastic strain it takes, and the whole design can be lost in
+        /// the first half second if the coolant arrives after the gas.
+        /// </summary>
+        private static void CheckStructureAndStartup(
+            EngineAssembly a, ChamberConditions ch, EngineSpec spec,
+            Dictionary<string, CoolingCandidate?> circuits)
+        {
+            foreach (var (name, cand) in circuits)
+            {
+                if (cand?.Solution is null) continue;
+                CoolingSolution sol = cand.Solution;
+
+                var st = Structural.Analyse(sol, ch.ChamberPressure,
+                                            1.5 * ch.ChamberPressure, sol.WallRadiusMm,
+                                            spec.Geometry.WallThicknessMm,
+                                            spec.Structure.RequiredCycles);
+                Library.Log($"{name,-18} thermal {st.ThermalStress.Max() / 1e6:F2} MPa, " +
+                            $"hoop {st.HoopStress.Max() / 1e6:F2}, " +
+                            $"combined {st.CombinedStress.Max() / 1e6:F2} MPa");
+                Library.Log($"  yields           {(st.StaysElastic ? "no" : "yes, as expected")}");
+                Library.Log($"  cycle life       {st.CyclesToFailure:F0} against {st.RequiredCycles:F0} required");
+                if (!st.Survives)
+                    Library.Log($"WARNING {name}: structural life is short of what is required");
+
+                var run = Transient.SolveStartup(sol, null, spec.Startup.RampTimeS,
+                                                 spec.Startup.CoolantLeadS);
+                Library.Log($"  startup peak     {run.PeakWallTemp:F2} K vs steady " +
+                            $"{run.SteadyWallTemp:F2} K, overshoot {run.Overshoot:F2} K");
+                Library.Log($"  wall diffusion   {run.DiffusionTime * 1e3:F3} ms");
+                if (!run.Survives)
+                    Library.Log($"WARNING {name}: startup peaks at {run.PeakWallTemp:F0} K, over " +
+                                $"the {run.Material.MaxWallTemp:F0} K limit, with a coolant lead " +
+                                $"of {spec.Startup.CoolantLeadS:+0.00;-0.00} s");
+            }
+        }
+
+        /// <summary>
+        /// Where the chamber wants to ring, and whether the standard screens
+        /// pass. This cannot say the engine is stable; only hot fire can.
+        /// </summary>
+        private static void CheckStability(EngineAssembly a, ChamberConditions ch,
+                                           EngineSpec spec, InjectorDesign? inj)
+        {
+            var s = Stability.Analyse(
+                ch,
+                chamberLengthM: (a.ConvergingStartXMm - a.HeadXMm) * 1e-3,
+                meanRadiusM: 0.5 * (a.ShoulderRadiusMm + a.ChamberOuterRadiusMm) * 1e-3,
+                annulusGapM: (a.ChamberOuterRadiusMm - a.ShoulderRadiusMm) * 1e-3,
+                injectionStiffness: inj?.Stiffness ?? 0.0);
+
+            Library.Log($"speed of sound     {s.SpeedOfSound:F3} m/s");
+            Library.Log($"L*                 {s.CharacteristicLength:F6} m");
+            Library.Log($"residence time     {s.ResidenceTime * 1e3:F4} ms");
+            Library.Log($"1L / 1T / 2T / 1R  {s.FLongitudinal1:F0} / {s.FTangential1:F0} / " +
+                        $"{s.FTangential2:F0} / {s.FRadial1:F0} Hz");
+            Library.Log($"chug estimate      {s.FChugEstimate:F0} Hz");
+
+            if (!s.LStarOk)
+                Library.Log($"WARNING L* of {s.CharacteristicLength:F3} m is outside the 0.6 to " +
+                            $"1.5 m band: too short and the propellant leaves before it has " +
+                            $"burned, so the assumed c* efficiency is optimistic");
+            if (!s.SeparationOk)
+                Library.Log($"WARNING chug estimate {s.FChugEstimate:F0} Hz is not well separated " +
+                            $"from the first tangential at {s.FTangential1:F0} Hz");
+            if (!s.StiffnessOk)
+                Library.Log("WARNING injection stiffness is below the 0.15 chug floor");
+        }
+
+        /// <summary>
+        /// Thrust from the plug surface pressure against ambient, which is the
+        /// altitude compensation the ideal bell coefficient cannot show.
+        /// </summary>
+        private static void LogAltitudeCompensation(PlugContour c, ChamberConditions ch)
+        {
+            double eps = Math.PI * c.ExitRadiusMm * c.ExitRadiusMm / c.ThroatAreaMm2;
+            foreach (double pa in new[] { 1.01325e5, 0.5e5, 0.2e5, 0.05e5, 0.0 })
+            {
+                var t = PlugFlow.Thrust(c, ch, pa);
+                double bell = Combustion.ThrustCoefficient(ch.Propellant.Gamma, eps,
+                                                           c.ExitMach, ch.ChamberPressure, pa);
+                Library.Log($"pa {pa / 1e5,7:F3} bar   CF plug {t.ThrustCoefficient:F4}   " +
+                            $"CF bell {bell:F4}   gain {t.ThrustCoefficient / bell:F3}   " +
+                            $"attached {t.AttachedFraction * 100:F1}%   Isp {t.Isp:F2} s");
+            }
         }
 
         private static void LogBox(string strName, Voxels vox)

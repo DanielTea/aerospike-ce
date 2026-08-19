@@ -266,14 +266,37 @@ namespace AerospikeCE
         ///
         /// Letting the anchor run past the shoulder instead looks equivalent
         /// and pinches the duct to about 0.47 * A_t just aft of it.
+        ///
+        /// Where the fan begins is not a free constant. Through the fan the
+        /// station sits at x = d sin(theta), and starting while the offset
+        /// distance d is still large makes that product overshoot the lip and
+        /// come back -- the wall folds. A fixed start works at a contraction
+        /// ratio of 3 and fails at 8, whatever the converging length, because
+        /// the fold is set by how big d is when rotation begins and not by how
+        /// much axial room there is. So the fan starts where the schedule has
+        /// already brought the area down to fanAreaRatio times the throat.
         /// </summary>
         private static (double[] x, double[] r) ContractionWall(
             PlugContour c, double chamberArea, double convergingLengthMm,
-            int n = 200, double cornerFanStart = 0.65)
+            int n = 200, double fanAreaRatio = 1.5)
         {
             double r0 = c.R[0];
             double nuE = c.ThroatAngleRad;
             double aT = c.ThroatAreaMm2;
+
+            if (fanAreaRatio <= 1.0)
+                throw new ArgumentException("fanAreaRatio must exceed 1");
+
+            // start the fan where the area schedule reaches fanAreaRatio * A_t
+            double target = Math.Min(fanAreaRatio * aT, chamberArea);
+            double want = (chamberArea - target) / (chamberArea - aT);
+            double blo = 0.0, bhi = 1.0;
+            for (int b = 0; b < 200; b++)          // invert smoothstep by bisection
+            {
+                double mid = 0.5 * (blo + bhi);
+                if (SmoothStep(mid) < want) blo = mid; else bhi = mid;
+            }
+            double cornerFanStart = Math.Min(Math.Max(0.5 * (blo + bhi), 1e-6), 1.0 - 1e-6);
 
             var xs = new double[n];
             var rs = new double[n];
@@ -297,7 +320,32 @@ namespace AerospikeCE
                 xs[i] = xAnchor + d * Math.Sin(theta);
                 rs[i] = r0 + d * cosT;
             }
-            return (xs, rs);
+
+            // The offset locus can curl back near the throat: through the fan
+            // the offset distance shrinks while the direction is still
+            // rotating, so x = d sin(theta) passes a maximum before the last
+            // station. Two microns at a contraction ratio of 6, and enough to
+            // corrupt every interpolation that walks this wall. Drop the
+            // overshoot rather than flatten it -- clamping leaves points
+            // sharing one x with different r, which two interpolators resolve
+            // two different ways.
+            double fold = 0.0, running = double.NegativeInfinity;
+            foreach (double xv in xs) { running = Math.Max(running, xv); fold = Math.Max(fold, running - xv); }
+            if (fold > 0.05)
+                throw new ArgumentException(
+                    $"the cowl wall folds back {fold:F3} mm through the contraction. " +
+                    $"The corner fan no longer fits: lower contraction_ratio or " +
+                    $"lengthen converging_length_mm");
+
+            var keep = new bool[n];
+            double run = double.PositiveInfinity;
+            for (int i = n - 1; i >= 0; i--)
+                if (xs[i] < run) { keep[i] = true; run = xs[i]; }
+
+            var kx = new List<double>(n);
+            var kr = new List<double>(n);
+            for (int i = 0; i < n; i++) if (keep[i]) { kx.Add(xs[i]); kr.Add(rs[i]); }
+            return (kx.ToArray(), kr.ToArray());
         }
 
         // ------------------------------------------------------------------

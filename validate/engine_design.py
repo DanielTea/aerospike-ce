@@ -24,15 +24,21 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
+import plug_flow_ref
+import stability_ref
+import structural_ref
+import transient_ref
 from combustion_ref import ChamberConditions, chamber_from_spec
 from cooling_ref import (
     MATERIALS,
     ChannelSpec,
+    CoatingSpec,
     CoolingCandidate,
+    FilmSpec,
     search_cooling_design,
     solve_cooling,
 )
@@ -55,6 +61,13 @@ class EngineDesign:
     coolant_split: dict                 # name -> fraction
     heat_load: dict                     # name -> W, at reference channel
     notes: list
+    film: FilmSpec | None = None
+    coating: CoatingSpec | None = None
+    structure: dict = field(default_factory=dict)     # name -> StructuralResult
+    startup: dict = field(default_factory=dict)       # name -> StartupResult
+    stability: object = None
+    altitude: list = field(default_factory=list)      # PlugThrust sweep
+    characteristic_length: float = 0.0
 
     @property
     def cooled(self) -> bool:
@@ -74,10 +87,17 @@ class EngineDesign:
 
 
 def _circuit_walls(a: EngineAssembly, gamma: float):
+    """
+    Each cooled wall with the radius its channel count must be packed against.
+
+    That is the *smallest* radius on the run, not the chamber radius. Channels
+    sized for the widest station cannot fit round the narrowest one, and the
+    width clamp then silently starves them below the manufacturing floor.
+    """
     w = wall_flow_state(a, gamma)
     return {
-        "cowl": (w["cowl"], a.chamber_outer_radius),
-        "centrebody": (w["centrebody"], a.shoulder_radius),
+        "cowl": (w["cowl"], float(np.min(w["cowl"]["r"]))),
+        "centrebody": (w["centrebody"], float(np.min(w["centrebody"]["r"]))),
     }
 
 
@@ -99,6 +119,28 @@ def design_engine(spec: dict) -> EngineDesign:
     materials = tuple(cool.get("materials", ("grcop42", "inconel718")))
     dt = 2.0 * c.throat_slant_length     # hydraulic diameter of the slot throat
 
+    film_cfg = spec.get("film", {})
+    film = FilmSpec(
+        fuel_fraction=film_cfg.get("fuel_fraction", 0.0),
+        inject_x_mm=film_cfg.get("inject_x_mm", a.head_x),
+        slot_height_mm=film_cfg.get("slot_height_mm", 0.3),
+    ) if film_cfg.get("fuel_fraction", 0.0) > 0.0 else None
+
+    coat_cfg = spec.get("coating", {})
+    coating = CoatingSpec(
+        thickness_mm=coat_cfg.get("thickness_mm", 0.0),
+        conductivity=coat_cfg.get("conductivity", 1.0),
+        max_surface_temp=coat_cfg.get("max_surface_temp_k", 1600.0),
+    ) if coat_cfg.get("thickness_mm", 0.0) > 0.0 else None
+
+    # characteristic length: chamber plus converging volume over throat area.
+    # Too short and the propellant leaves before it has finished burning, which
+    # shows up as a c* efficiency far below the one the spec assumes.
+    a_ch = a.chamber_area
+    v_chamber = a_ch * chamber_spec_length(spec) * 1e-9
+    v_conv = 2.0 * c.throat_area * spec["chamber"]["converging_length_mm"] * 1e-9
+    l_star = (v_chamber + v_conv) / (c.throat_area * 1e-6)
+
     walls = _circuit_walls(a, chamber.propellant.gamma)
 
     # --- measure each circuit's load before dividing the coolant -------------
@@ -106,7 +148,7 @@ def design_engine(spec: dict) -> EngineDesign:
     for name, (d, r_ref) in walls.items():
         sol = solve_cooling(chamber, d["x"], d["r"], d["area_ratio"], d["mach"],
                             REFERENCE_CHANNEL, MATERIALS[materials[0]], dt, dt,
-                            coolant_fraction=1.0)
+                            coolant_fraction=1.0, film=film, coating=coating)
         heat_load[name] = sol.total_heat
 
     total_load = sum(heat_load.values())
@@ -122,6 +164,11 @@ def design_engine(spec: dict) -> EngineDesign:
             coolant_fraction=split[name],
             max_pressure_drop_fraction=cool.get("max_pressure_drop_fraction", 0.5),
             min_channel_width_mm=cool.get("min_channel_width_mm", 0.4),
+            min_hot_wall_mm=cool.get("min_hot_wall_mm", 0.3),
+            # the channel has to fit in the wall with backing left behind it
+            max_depth_mm=(spec["geometry"]["wall_thickness_mm"]
+                          - cool.get("back_wall_mm", 0.5)),
+            film=film, coating=coating,
         )
         circuits[name] = best
         if best is None:
@@ -155,8 +202,63 @@ def design_engine(spec: dict) -> EngineDesign:
         notes.append(f"injection stiffness {injector.stiffness_fuel:.2f} is below the "
                      f"0.15 chug floor")
 
+    # ---- structure, startup, stability, altitude ----------------------------
+    structure: dict = {}
+    startup: dict = {}
+    for name, cand in circuits.items():
+        if cand is None:
+            continue
+        sol = cand.solution
+        r_wall = np.interp(sol.x, walls[name][0]["x"], walls[name][0]["r"])
+        st = structural_ref.analyse(
+            sol, chamber.chamber_pressure,
+            1.5 * chamber.chamber_pressure, r_wall,
+            spec["geometry"]["wall_thickness_mm"],
+            required_cycles=spec.get("structure", {}).get("required_cycles", 100.0))
+        structure[name] = st
+        if not st.survives:
+            notes.append(f"{name}: structural life {st.cycles_to_failure:.0f} cycles "
+                         f"is short of the {st.required_cycles:.0f} required")
+
+        seq = spec.get("startup", {})
+        run = transient_ref.solve_startup(
+            sol, ramp_time=seq.get("ramp_time_s", 0.30),
+            coolant_lead=seq.get("coolant_lead_s", 0.2))
+        startup[name] = run
+        if not run.survives:
+            notes.append(f"{name}: startup peaks at {run.peak_wall_temp:.0f} K, over the "
+                         f"{run.material.max_wall_temp:.0f} K limit, with a coolant lead of "
+                         f"{seq.get('coolant_lead_s', 0.2):+.2f} s")
+
+    stab = stability_ref.analyse(
+        chamber,
+        chamber_length_m=(a.converging_start_x - a.head_x) * 1e-3,
+        mean_radius_m=0.5 * (a.shoulder_radius + a.chamber_outer_radius) * 1e-3,
+        annulus_gap_m=(a.chamber_outer_radius - a.shoulder_radius) * 1e-3,
+        injection_stiffness=injector.stiffness_fuel if injector else 0.0,
+    )
+    if not stab.l_star_ok:
+        notes.append(f"characteristic length {l_star:.3f} m is outside the 0.6 to 1.5 m "
+                     f"band: too short and the propellant leaves before it has burned, "
+                     f"so the assumed c* efficiency of "
+                     f"{chamber.c_star_efficiency:.2f} is optimistic")
+    if not stab.separation_ok:
+        notes.append(f"chug estimate {stab.f_chug_estimate:.0f} Hz is not well separated "
+                     f"from the first tangential at {stab.f_tangential_1:.0f} Hz")
+
+    altitude = plug_flow_ref.altitude_sweep(
+        c, chamber, np.array([1.01325e5, 0.5e5, 0.2e5, 0.05e5, 0.0]))
+
     return EngineDesign(spec, a, chamber, injector, why,
-                        circuits, split, heat_load, notes)
+                        circuits, split, heat_load, notes,
+                        film=film, coating=coating,
+                        structure=structure, startup=startup,
+                        stability=stab, altitude=altitude,
+                        characteristic_length=l_star)
+
+
+def chamber_spec_length(spec: dict) -> float:
+    return spec["chamber"]["chamber_length_mm"]
 
 
 def report(d: EngineDesign) -> str:
@@ -211,6 +313,58 @@ def report(d: EngineDesign) -> str:
     L.append("")
     L.append(f"  total heat         {d.total_heat / 1e3:10.0f} kW"
              f"   ({d.total_heat / d.coolant_capacity * 100:.0f}% of coolant capacity)")
+    if d.film is not None:
+        L.append(f"  film               {d.film.fuel_fraction * 100:10.1f}% of fuel along the wall")
+    if d.coating is not None:
+        L.append(f"  coating            {d.coating.thickness_mm:10.2f} mm")
+
+    if d.structure:
+        L.append("")
+        L.append("structure   (thermal strain, not pressure, is what limits a regen wall)")
+        for name, st in d.structure.items():
+            L.append(f"  {name:12s} thermal {st.thermal_stress.max() / 1e6:6.1f} MPa, "
+                     f"hoop {st.hoop_stress.max() / 1e6:5.1f}, "
+                     f"combined {st.combined_stress.max() / 1e6:6.1f} MPa")
+            L.append(f"  {'':12s} yields: {'no' if st.stays_elastic else 'yes, as expected'};  "
+                     f"life {st.cycles_to_failure:,.0f} cycles against "
+                     f"{st.required_cycles:.0f} required")
+
+    if d.startup:
+        L.append("")
+        seq = d.spec.get("startup", {})
+        L.append(f"startup     (coolant lead {seq.get('coolant_lead_s', 0.2):+.2f} s, "
+                 f"ramp {seq.get('ramp_time_s', 0.3):.2f} s)")
+        for name, run in d.startup.items():
+            L.append(f"  {name:12s} peak {run.peak_wall_temp:6.0f} K vs steady "
+                     f"{run.steady_wall_temp:.0f} K, overshoot {run.overshoot:+.0f} K"
+                     f"   (wall diffusion time {run.diffusion_time * 1e3:.1f} ms)")
+
+    if d.stability is not None:
+        s = d.stability
+        L.append("")
+        L.append("stability   (screens, not a prediction; only hot fire settles this)")
+        L.append(f"  L*                 {s.characteristic_length:10.3f} m   "
+                 f"{'ok' if s.l_star_ok else 'OUT OF BAND'}")
+        L.append(f"  residence time     {s.residence_time * 1e3:10.3f} ms")
+        L.append(f"  speed of sound     {s.speed_of_sound:10.0f} m/s")
+        L.append(f"  1L / 1T / 2T / 1R  {s.f_longitudinal_1:.0f} / {s.f_tangential_1:.0f} / "
+                 f"{s.f_tangential_2:.0f} / {s.f_radial_1:.0f} Hz")
+        L.append(f"  chug estimate      {s.f_chug_estimate:10.0f} Hz   "
+                 f"{'well clear of 1T' if s.separation_ok else 'TOO CLOSE TO 1T'}")
+
+    if d.altitude:
+        L.append("")
+        L.append("altitude compensation   (plug surface pressure integrated against ambient)")
+        L.append(f"  {'ambient':>10s} {'CF plug':>9s} {'CF bell':>9s} {'gain':>7s} "
+                 f"{'attached':>9s} {'Isp':>7s}")
+        from combustion_ref import thrust_coefficient
+        for t in d.altitude:
+            cfb = thrust_coefficient(ch.propellant.gamma, c.exit_radius ** 2 * math.pi
+                                     / c.throat_area, c.exit_mach,
+                                     ch.chamber_pressure, t.ambient_pressure)
+            L.append(f"  {t.ambient_pressure / 1e5:9.3f}b {t.thrust_coefficient:9.4f} "
+                     f"{cfb:9.4f} {t.thrust_coefficient / cfb:7.3f} "
+                     f"{t.attached_fraction * 100:8.1f}% {t.isp:7.1f}")
     if d.notes:
         L.append("")
         L.append("NOTES")
