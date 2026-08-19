@@ -1,0 +1,86 @@
+{
+  "name": "regen-spike-75-optimised",
+  "comment": "A regeneratively cooled aerospike. Same model as demo.json, sized to where the cooling actually closes. At demo.json's 30 mm exit radius the fuel flow cannot absorb the wall heat load at any channel geometry, and the model reports that rather than pretending otherwise. Mixture ratio 2.4 is deliberately below the 3.4 c* peak: running fuel-rich buys coolant mass flow and costs about 4 s of specific impulse, which is the trade every regeneratively cooled engine makes.",
+  "gas": {
+    "gamma": 1.2,
+    "comment": "Must match propellant.gamma. The contour uses this one, the performance model uses that one, and a mismatch silently designs two different engines."
+  },
+  "nozzle": {
+    "expansion_ratio": 8.009722867795366,
+    "exit_radius_mm": 75.0,
+    "contour_points": 300,
+    "truncate_fraction": 0.15296427794739434
+  },
+  "chamber": {
+    "contraction_ratio": 2.200525366090318,
+    "chamber_length_mm": 56.94816371274582,
+    "converging_length_mm": 55.36919630238119
+  },
+  "geometry": {
+    "voxel_size_mm": 0.2,
+    "wall_thickness_mm": 4.8315394805591065,
+    "lip_thickness_mm": 1.0,
+    "base_cap_thickness_mm": 4.0,
+    "head_thickness_mm": 6.0,
+    "flange_width_mm": 21.34737198304166
+  },
+  "propellant": {
+    "combination": "lox_ch4",
+    "comment": "Tabulated textbook values, not equilibrium chemistry. Override any of mr_peak, c_star_peak_ms, t_chamber_peak_k, gamma, molar_mass with CEA or RPA output before building anything."
+  },
+  "operation": {
+    "chamber_pressure_bar": 60.0,
+    "mixture_ratio": 3.4404568904785933,
+    "c_star_efficiency": 0.94,
+    "truncation_efficiency": 0.99,
+    "ambient_pressure_pa": 101325.0
+  },
+  "film": {
+    "fuel_fraction": 0.08,
+    "slot_height_mm": 0.5,
+    "combustion_efficiency": 0.5,
+    "comment": "Fuel injected along the wall at the head end. Not free: it carries mass through the nozzle without burning at the design mixture ratio, so it is charged at combustion_efficiency and shows up as lost specific impulse. It is what lets the chamber be long enough for a sane L* and still be coolable."
+  },
+  "coating": {
+    "thickness_mm": 0.0,
+    "conductivity": 1.0,
+    "max_surface_temp_k": 1600.0,
+    "comment": "Yttria-stabilised zirconia if enabled. A tenth of a millimetre is worth three millimetres of copper thermally, but the coating surface then runs far hotter than the metal and spalls if pushed past max_surface_temp_k. Off by default."
+  },
+  "startup": {
+    "ramp_time_s": 0.3,
+    "coolant_lead_s": 0.2,
+    "comment": "coolant_lead_s is how far ahead of the gas the coolant is established. Negative means the gas arrives first, which on this engine overshoots the wall limit by hundreds of kelvin. This is a valve sequencing requirement, not a preference."
+  },
+  "structure": {
+    "required_cycles": 100.0,
+    "comment": "The hot wall is expected to exceed yield every firing; regen chambers all do. Life, not elasticity, is the criterion."
+  },
+  "cooling": {
+    "materials": [
+      "grcop42",
+      "inconel718"
+    ],
+    "min_channel_width_mm": 0.4,
+    "min_hot_wall_mm": 0.7,
+    "max_pressure_drop_fraction": 0.5,
+    "comment": "min_hot_wall_mm is the constraint that matters most. Left free the search picks 0.3 mm, because the hot wall is the largest thermal resistance in the stack; a third of a millimetre between 3400 K gas and cryogenic methane is not something a powder-bed machine holds, and it is too thin to inspect. 0.7 mm still leaves over 100 K of margin. The two circuits run in parallel off the fuel feed. The split is NOT an input: engine_design.py measures each circuit's heat load first and divides the fuel in that ratio, because the centrebody carries both the chamber wall and the whole plug surface and an even split starves it."
+  },
+  "injector": {
+    "stiffness": 0.2,
+    "discharge_coefficient": 0.75,
+    "min_land_mm": 0.8,
+    "comment": "stiffness is dP/pc. Below about 0.15 the chamber starts talking back to the feed system."
+  },
+  "mesh": {
+    "theta_steps": 180,
+    "simplify_tolerance_mm": 0.005,
+    "voxel_size_mm": 0.25
+  },
+  "output": {
+    "stl_dir": "out",
+    "export_spike": true,
+    "export_cowl": true,
+    "export_head": true
+  }
+}

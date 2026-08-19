@@ -57,6 +57,9 @@ the two is the failure mode this structure exists to prevent.
 | `validate/stability_ref.py` | chamber acoustics and screens | not a stability prediction |
 | `validate/plug_flow_ref.py` | plug surface pressure, altitude | not method of characteristics |
 | `validate/engine_design.py` | the whole pipeline, one spec in | derives the coolant split |
+| `validate/interfaces_ref.py` | ports, bosses, the head joint | what to connect where |
+| `validate/printability_ref.py` | overhangs, bridges, drainage | decides the build direction |
+| `validate/optimise_ref.py` | evolutionary search over the spec | seeded, so it is testable |
 | `validate/mesh_solid.py` | SDF + marching cubes | for anything not axisymmetric |
 | `validate/mesh_export.py` | revolve to STL, cutaway PNG | exact, axisymmetric only |
 | `validate/test_*.py` | invariants | add a test before adding physics |
@@ -93,6 +96,21 @@ functions, deliberately. PicoGK renders any bounded implicit into voxels, so the
 C# hands the kernel the identical formulation rather than booleaning several
 hundred channel solids and keeping a second description of the same geometry in
 step with the first.
+
+## Supportable is not the same as printable
+
+An overhang on an outer surface, or in a duct open at both ends, takes a support
+that gets broken off afterwards. An overhang inside a sealed cavity takes a
+support that stays there for ever, because nothing can reach in to remove it.
+Treating the two alike either rejects every printable engine or accepts an
+unbuildable one, so `printability_ref` casts a ray down the build direction and
+asks whether a support column could actually reach the facet.
+
+The corollary shaped the geometry: the centrebody cavity now closes on the axis
+in a cone and is clamped so it never narrows faster than the process angle. A
+constant-thickness offset of the spike is the obvious hollowing and it is
+unbuildable -- an internal void that narrows as it rises hangs material over
+nothing, and there is no way in to support it.
 
 ## Measure perpendicular, not radially
 
@@ -183,6 +201,11 @@ integrated against ambient. Each is a screening model of the same character:
 Still genuinely absent: base flow on the truncated plug, combustion response,
 creep, and any real CFD. If a design needs one of those to close, say so instead
 of tuning inputs until the report looks green.
+
+`optimise_ref.py` ranks by Deb's rules rather than by a penalty function:
+feasible beats infeasible, then smaller violation, then better objective. That
+avoids inventing an exchange rate between "melted by 40 K" and "three seconds of
+impulse", which is a trade nobody can make honestly. Keep it that way.
 
 The habit that matters more than any scope line: when a model cannot make a
 design work, report that. `engine_design.py` returns no cooling circuit at all

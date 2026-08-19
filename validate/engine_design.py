@@ -365,6 +365,40 @@ def report(d: EngineDesign) -> str:
             L.append(f"  {t.ambient_pressure / 1e5:9.3f}b {t.thrust_coefficient:9.4f} "
                      f"{cfb:9.4f} {t.thrust_coefficient / cfb:7.3f} "
                      f"{t.attached_fraction * 100:8.1f}% {t.isp:7.1f}")
+    # ---- how it is plumbed and how it is built ------------------------------
+    try:
+        from interfaces_ref import build_schedule, port_clashes, port_schedule_table
+        sched = build_schedule(d)
+        L.append("")
+        L.append("interfaces  (what to connect where)")
+        for line in port_schedule_table(sched).splitlines():
+            L.append("  " + line)
+        clashes = port_clashes(sched, d)
+        if clashes:
+            L.append("  CLASHES:")
+            for c in clashes:
+                L.append(f"    - {c}")
+        for n in sched.notes:
+            L.append(f"  note: {n}")
+    except Exception as exc:                       # noqa: BLE001
+        L.append(f"\ninterfaces unavailable: {exc}")
+
+    try:
+        from printability_ref import choose_build_direction
+        best, _, _ = choose_build_direction(d)
+        L.append("")
+        L.append("printability")
+        L.append(f"  build {best.build_direction} "
+                 f"({'head down, spike up' if best.build_direction == '+x' else 'spike down'})"
+                 f"   {best.height_mm:.0f} mm tall, {best.diameter_mm:.0f} mm across")
+        L.append(f"  {len(best.unsupportable)} unsupportable, "
+                 f"{len(best.needs_support)} need removable support   "
+                 f"-> {'PRINTABLE' if best.printable else 'NOT PRINTABLE'}")
+        for f in best.unsupportable[:4]:
+            L.append(f"    X {f.part}: {f.detail}")
+    except Exception as exc:                       # noqa: BLE001
+        L.append(f"\nprintability unavailable: {exc}")
+
     if d.notes:
         L.append("")
         L.append("NOTES")

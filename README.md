@@ -259,6 +259,79 @@ the surface falls below ambient because the plume detaches there, shows the plug
 beating the bell at sea level and converging with it at altitude. That
 truncation *is* the compensation mechanism, expressed geometrically.
 
+## What to connect where
+
+The engine is plumbed, not just shaped. `engine_design.py` prints the whole port
+schedule -- bore, fitting size, flow, pressure and temperature for every
+connection -- but the routing is worth stating plainly, because regenerative
+cooling makes it less obvious than it looks:
+
+| port | fluid | goes where |
+|---|---|---|
+| `fuel_in_cowl` | fuel | radial boss near the throat. Feeds the cowl jacket; the fuel then runs *forward* through the cowl channels to the injector |
+| `fuel_in_spike` | fuel | axial, down the centre bore. Runs aft to the spike feed ports, then forward through the spike channels |
+| `ox_in` | oxidiser | axial into the dome. Does no cooling, stays cold |
+| `igniter` | gas | radial into the chamber annulus. Radial because the centre bore is carrying fuel |
+| `pc_tap` | - | chamber pressure, opposite the igniter |
+| `t_coolant_out`, `p_coolant_out` | - | head manifold instrumentation |
+
+**There is no coolant outlet.** The fuel *is* the coolant: it leaves both jackets
+into the injector manifold and gets burned. A port taking it out of the engine
+would be throwing away the propellant along with the heat. Both fuel legs are
+split in the ratio the two jackets actually need, which the thermal model
+derives -- the centrebody carries the chamber wall *and* the whole plug surface,
+so it takes about 55 percent, and an even split starves it.
+
+The head joint is sized against the separating load rather than drawn: chamber
+pressure over the sealed annulus plus the thrust reaction, with enough preload
+that the joint never gaps. Working that through is what caught the flange being
+half a millimetre too narrow to take its own fasteners.
+
+## Printability, and which way up
+
+Powder-bed fusion builds upward, so every downward face has to hold itself up
+and every internal void needs a way for the powder out. `printability_ref.py`
+checks both and picks the build direction; on this engine it is head down, spike
+up, and that is not a matter of taste. Built that way the cowl and centrebody
+outer surfaces both narrow as they rise, and the cooling channels run parallel
+to the build direction, so several hundred of them are vertical tunnels with no
+roof at all. Inverted, all of that inverts with it.
+
+The distinction that matters is whether a support can *reach* a facet. An
+overhang on an outer surface takes a support that gets broken off afterwards. An
+overhang inside a sealed cavity takes one that stays there for ever. So the
+checker casts a ray down the build direction and asks whether a column could
+stand there.
+
+That is what forced the centrebody's cavity to change shape. A constant-thickness
+offset of the spike is the obvious way to hollow it, and it is unbuildable: an
+internal void that narrows as it rises hangs material over nothing, which was 124
+unsupported facets at the shoulder plus a flat internal ceiling 30 mm across. The
+cavity now closes on the axis in a cone and is clamped so it never narrows faster
+than the process angle, propagated backward from the tip so the wall only ever
+gains material. It costs about ten percent more mass, which is what printability
+costs and is worth seeing.
+
+## Optimisation
+
+```bash
+python validate/optimise_ref.py --spec spec/regen.json --generations 25     --objective isp_sl --thrust-floor 7000 --out spec/optimised.json
+```
+
+Nine variables across the nozzle, chamber, operating point and structure, driven
+by a `(mu + lambda)` evolution strategy with self-adaptive step sizes. Gradients
+are the wrong tool here: ask for slightly more chamber pressure and the cooling
+search may find nothing at all, so the space has cliffs rather than slopes, and
+much of it is simply infeasible.
+
+Constraints use Deb's rules rather than penalty weights -- feasible beats
+infeasible, then smaller violation, then better objective. That avoids inventing
+an exchange rate between "melted by 40 K" and "three seconds of impulse", and it
+lets the search start infeasible and walk itself in.
+
+Cooling closing, the wall surviving its cycles, the part being printable and the
+joint bolting up are all constraints, not terms to be traded away.
+
 ## Meshing, and where it runs out
 
 Two paths. `mesh_export.py` revolves a meridional profile: exact, cheap, and

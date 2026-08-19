@@ -69,6 +69,17 @@ class Finding:
     value: float            # angle in degrees, or span/size in mm
     limit: float
     detail: str
+    supportable: bool = True
+    """
+    Whether a support column could reach this facet from the build plate.
+
+    The distinction decides whether a finding is a nuisance or a defect. An
+    overhang on an outer surface, or on the wall of a duct that is open at both
+    ends, takes a support that gets broken off afterwards -- ugly, and routine.
+    An overhang inside a sealed cavity takes a support that stays there for
+    ever, because nothing can reach in to remove it. Treating the two alike
+    either rejects every printable engine or accepts an unbuildable one.
+    """
 
     @property
     def severity(self) -> float:
@@ -88,8 +99,24 @@ class PrintabilityResult:
     diameter_mm: float = 0.0
 
     @property
+    def unsupportable(self) -> list:
+        """Findings a support column cannot reach. These are the real defects."""
+        return [f for f in self.findings if not f.supportable]
+
+    @property
+    def needs_support(self) -> list:
+        """Findings that print fine with support that can be removed afterwards."""
+        return [f for f in self.findings if f.supportable
+                and f.kind in ("overhang", "bridge")]
+
+    @property
     def printable(self) -> bool:
-        return not self.findings and self.envelope_ok
+        """
+        Buildable as it stands. Supportable overhangs do not disqualify a part;
+        they cost support material and a finishing operation.
+        """
+        return not self.unsupportable and self.envelope_ok and not [
+            f for f in self.findings if f.kind in ("feature", "drainage", "envelope")]
 
     @property
     def worst(self):
@@ -130,6 +157,36 @@ def surface_angles(x: np.ndarray, r: np.ndarray, build_plus_x: bool):
     return angle, facing_down, dx, dr
 
 
+def reachable_from_plate(x_mid: float, r_mid: float,
+                         px: np.ndarray, pr: np.ndarray,
+                         build_plus_x: bool) -> bool:
+    """
+    Whether a support column can rise from the plate to this facet.
+
+    Casts a ray straight down the build direction at constant radius and counts
+    how many times it crosses the meridional profile. No crossings means clear
+    air all the way to the plate, so a support can stand there. Any crossing
+    means the column would have to pass through solid metal to get here, which
+    is the signature of an enclosed void.
+
+    Valid because the part is a body of revolution: a ray at constant radius in
+    the meridional plane is a cylinder in three dimensions, and the profile
+    tells the whole story.
+    """
+    ax, ar = px, pr
+    bx, br = np.roll(px, -1), np.roll(pr, -1)
+
+    # segments straddling this radius
+    straddles = ((ar > r_mid) != (br > r_mid))
+    if not straddles.any():
+        return True
+    t = (r_mid - ar[straddles]) / (br[straddles] - ar[straddles])
+    cross_x = ax[straddles] + t * (bx[straddles] - ax[straddles])
+
+    below = cross_x < x_mid - 1e-9 if build_plus_x else cross_x > x_mid + 1e-9
+    return int(np.count_nonzero(below)) == 0
+
+
 def check_profile(part: str, x, r, process: ProcessSpec,
                   build_plus_x: bool = True, axis_tol: float = 1e-9) -> list:
     """
@@ -162,6 +219,11 @@ def check_profile(part: str, x, r, process: ProcessSpec,
         if r[i] < axis_tol and r[(i + 1) % len(r)] < axis_tol:
             continue
 
+        mx = 0.5 * (x[i] + x[j])
+        mr = 0.5 * (r[i] + r[j])
+        supportable = reachable_from_plate(mx, mr, x, r, build_plus_x)
+        where = "" if supportable else " inside a sealed cavity, so it cannot be supported"
+
         if angle[i] < 5.0:
             # effectively a flat ceiling: it bridges rather than overhangs
             span = abs(dr[i])
@@ -170,13 +232,15 @@ def check_profile(part: str, x, r, process: ProcessSpec,
                     part, "bridge", float(x[i]), float(r[i]), span,
                     process.max_bridge_mm,
                     f"flat downward face spanning {span:.1f} mm; it will sag "
-                    f"across anything past {process.max_bridge_mm:.1f} mm"))
+                    f"across anything past {process.max_bridge_mm:.1f} mm{where}",
+                    supportable))
         elif angle[i] < process.self_supporting_deg - 1e-6:
             out.append(Finding(
                 part, "overhang", float(x[i]), float(r[i]), float(angle[i]),
                 process.self_supporting_deg,
                 f"downward face at {angle[i]:.1f} deg from the plate, under the "
-                f"{process.self_supporting_deg:.0f} deg the process holds"))
+                f"{process.self_supporting_deg:.0f} deg the process holds{where}",
+                supportable))
     return out
 
 
@@ -297,6 +361,8 @@ def report(result: PrintabilityResult) -> str:
     lines = [f"build direction {result.build_direction}"
              f"   {result.height_mm:.0f} mm tall, {result.diameter_mm:.0f} mm across"
              f"   envelope {'ok' if result.envelope_ok else 'EXCEEDED'}"]
+    lines.append(f"  {len(result.unsupportable)} unsupportable, "
+                 f"{len(result.needs_support)} need removable support")
     if not result.findings:
         lines.append("  no printability findings")
     for f in sorted(result.findings, key=lambda f: -f.severity):

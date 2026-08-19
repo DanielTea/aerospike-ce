@@ -460,6 +460,7 @@ def build_mesh_streaming(
     progress: bool = False,
     bbox: tuple[float, float, float, float] | None = None,
     keep_sector: tuple[float, float] | None = None,
+    x_window: tuple[float, float] | None = None,
 ):
     """
     Marching cubes over the volume in slabs, welded into one mesh.
@@ -491,6 +492,17 @@ def build_mesh_streaming(
     # more than twenty times in both memory and time -- which is what makes
     # verifying a sector at inspection resolution affordable at all.
     y0, y1, z0, z1 = bbox if bbox is not None else (-r_max, r_max, -r_max, r_max)
+
+    # An x window restricts the build to a slice of the part, which is what
+    # makes a detail view affordable: a 0.5 mm channel wants voxels far finer
+    # than the whole engine can carry, and over a short axial run it can have
+    # them. The mesh is left open at the cut, which is fine for looking at and
+    # not for measuring.
+    if x_window is not None:
+        x0 = max(x0, float(x_window[0]))
+        x1 = min(x1, float(x_window[1]))
+        if x1 <= x0:
+            raise ValueError("x_window does not overlap the part")
 
     nx = max(2, int(math.ceil((x1 - x0) / voxel_mm)) + 1)
     ny = max(2, int(math.ceil((y1 - y0) / voxel_mm)) + 1)
