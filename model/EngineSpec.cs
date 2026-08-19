@@ -42,6 +42,44 @@ namespace AerospikeCE
         [JsonPropertyName("flange_width_mm")]        public double FlangeWidthMm { get; set; } = 8.0;
     }
 
+    /// <summary>
+    /// Tabulated combustion properties. Not computed -- see Combustion.cs on
+    /// why, and on substituting CEA or RPA output.
+    /// </summary>
+    public sealed class PropellantSpec
+    {
+        [JsonPropertyName("combination")]      public string Combination { get; set; } = "lox_ch4";
+        [JsonPropertyName("mr_peak")]          public double? MrPeak { get; set; }
+        [JsonPropertyName("c_star_peak_ms")]   public double? CStarPeak { get; set; }
+        [JsonPropertyName("t_chamber_peak_k")] public double? TChamberPeak { get; set; }
+        [JsonPropertyName("gamma")]            public double? Gamma { get; set; }
+        [JsonPropertyName("molar_mass")]       public double? MolarMass { get; set; }
+    }
+
+    public sealed class OperationSpec
+    {
+        [JsonPropertyName("chamber_pressure_bar")]   public double ChamberPressureBar { get; set; } = 20.0;
+        [JsonPropertyName("mixture_ratio")]          public double MixtureRatio { get; set; } = 3.4;
+        [JsonPropertyName("c_star_efficiency")]      public double CStarEfficiency { get; set; } = 0.94;
+        [JsonPropertyName("truncation_efficiency")]  public double TruncationEfficiency { get; set; } = 0.99;
+        [JsonPropertyName("ambient_pressure_pa")]    public double AmbientPressurePa { get; set; } = 101325.0;
+    }
+
+    public sealed class CoolingSpec
+    {
+        [JsonPropertyName("materials")]                  public string[] Materials { get; set; } = { "grcop42", "inconel718" };
+        [JsonPropertyName("min_channel_width_mm")]       public double MinChannelWidthMm { get; set; } = 0.4;
+        [JsonPropertyName("max_pressure_drop_fraction")] public double MaxPressureDropFraction { get; set; } = 0.5;
+        [JsonPropertyName("back_wall_mm")]               public double BackWallMm { get; set; } = 0.5;
+    }
+
+    public sealed class InjectorSpec
+    {
+        [JsonPropertyName("stiffness")]             public double Stiffness { get; set; } = 0.20;
+        [JsonPropertyName("discharge_coefficient")] public double DischargeCoefficient { get; set; } = 0.75;
+        [JsonPropertyName("min_land_mm")]           public double MinLandMm { get; set; } = 0.8;
+    }
+
     public sealed class OutputSpec
     {
         [JsonPropertyName("stl_dir")]     public string StlDir { get; set; } = "out";
@@ -55,8 +93,12 @@ namespace AerospikeCE
         [JsonPropertyName("name")]     public string Name { get; set; } = "unnamed";
         [JsonPropertyName("gas")]      public GasSpec Gas { get; set; } = new();
         [JsonPropertyName("nozzle")]   public NozzleSpec Nozzle { get; set; } = new();
-        [JsonPropertyName("chamber")]  public ChamberSpec Chamber { get; set; } = new();
-        [JsonPropertyName("geometry")] public GeometrySpec Geometry { get; set; } = new();
+        [JsonPropertyName("chamber")]    public ChamberSpec Chamber { get; set; } = new();
+        [JsonPropertyName("geometry")]   public GeometrySpec Geometry { get; set; } = new();
+        [JsonPropertyName("propellant")] public PropellantSpec Propellant { get; set; } = new();
+        [JsonPropertyName("operation")]  public OperationSpec Operation { get; set; } = new();
+        [JsonPropertyName("cooling")]    public CoolingSpec Cooling { get; set; } = new();
+        [JsonPropertyName("injector")]   public InjectorSpec Injector { get; set; } = new();
         [JsonPropertyName("output")]   public OutputSpec Output { get; set; } = new();
 
         public static EngineSpec Load(string path)
