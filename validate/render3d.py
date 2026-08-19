@@ -54,7 +54,8 @@ def _features(design):
 def build_parts(design, voxel_mm: float, sweep_deg: float, target_tris: int,
                 x_window=None, keep_sector=None, decimate_to=True):
     a = design.assembly
-    sector = (0.0, math.radians(sweep_deg))
+    # sweep 0 means take nothing away: the closed engine, for exterior views
+    sector = (0.0, math.radians(sweep_deg)) if sweep_deg > 0.0 else None
     parts = {}
     for part in ("cowl", "centrebody", "head"):
         ch, pt, hl = [], [], []
@@ -121,6 +122,83 @@ def _shade(tri: np.ndarray, colour: str, elev: float, azim: float) -> np.ndarray
     return np.concatenate([rgb, np.ones((len(rgb), 1))], axis=1)
 
 
+def render_view(parts, elev, azim, title, path, subtitle=""):
+    """One framed view of a prepared set of meshes."""
+    fig = plt.figure(figsize=(9.5, 8.4))
+    ax = fig.add_subplot(111, projection="3d")
+    tris = np.concatenate([v[f] for v, f in parts.values()])
+    cols = np.concatenate([_shade(v[f], COLOUR[part], elev, azim)
+                           for part, (v, f) in parts.items()])
+    ax.add_collection3d(Poly3DCollection(
+        tris, facecolors=cols, edgecolors="none", linewidths=0.0))
+
+    lo = tris.reshape(-1, 3).min(axis=0)
+    hi = tris.reshape(-1, 3).max(axis=0)
+    pad = 0.03 * (hi - lo).max()
+    ax.set_xlim(lo[0] - pad, hi[0] + pad)
+    ax.set_ylim(lo[1] - pad, hi[1] + pad)
+    ax.set_zlim(lo[2] - pad, hi[2] + pad)
+    ax.set_box_aspect(tuple(np.maximum(hi - lo, 1e-6)))
+    ax.view_init(elev=elev, azim=azim)
+    ax.set_xlabel("x [mm]")
+    ax.set_ylabel("y [mm]")
+    ax.set_zlabel("z [mm]")
+    ax.set_title(title + ("\n" + subtitle if subtitle else ""), fontsize=11)
+    fig.savefig(path, dpi=110, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def gallery(design, spec, out_dir, voxel, detail_voxel, tris, sweep):
+    """
+    A set of views committed to the repository rather than to out/.
+
+    Meshing is the slow part and the views are cheap, so everything is built
+    once and looked at from many directions. out/ is generated output that is
+    never committed; these are documentation, so they live under docs/.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    a, ch = design.assembly, design.chamber
+    stamp = (f"{spec.get('name')}   {ch.thrust_sea_level / 1e3:.1f} kN sl   "
+             f"Isp {ch.isp_sea_level:.0f}/{ch.isp_vacuum:.0f} s   "
+             f"{a.overall_length:.0f} x {2 * a.overall_radius:.0f} mm")
+    written = []
+
+    print("meshing the closed engine")
+    closed = build_parts(design, voxel, 0.0, tris)
+    for az, name in ((-60.0, "01-three-quarter"), (0.0, "02-side"),
+                     (-120.0, "03-rear-quarter"), (180.0, "04-head-end")):
+        elev = 18.0 if name != "04-head-end" else 6.0
+        written.append(render_view(
+            closed, elev, az, f"{name.split('-', 1)[1].replace('-', ' ')}",
+            os.path.join(out_dir, f"{name}.png"), stamp))
+        print("  wrote", written[-1], flush=True)
+    del closed
+
+    print("meshing the cutaway")
+    cut = build_parts(design, voxel, sweep, tris)
+    for elev, az, name in ((18.0, -60.0, "05-cutaway"),
+                           (-22.0, 62.0, "06-into-the-section"),
+                           (60.0, -70.0, "07-from-above")):
+        written.append(render_view(
+            cut, elev, az, name.split("-", 1)[1].replace("-", " "),
+            os.path.join(out_dir, f"{name}.png"), stamp))
+        print("  wrote", written[-1], flush=True)
+    del cut
+
+    print("meshing the throat detail")
+    lip = a.contour.lip_x
+    detail = build_parts(design, detail_voxel, sweep, tris,
+                         x_window=(lip - 26.0, lip + 6.0),
+                         keep_sector=(math.radians(-14.0), math.radians(14.0)),
+                         decimate_to=False)
+    written.append(render_view(
+        detail, 16.0, -72.0, "throat detail: cooling channels in both walls",
+        os.path.join(out_dir, "08-throat-detail.png"), stamp))
+    print("  wrote", written[-1], flush=True)
+    return written
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--spec", default="../spec/regen.json")
@@ -129,12 +207,18 @@ def main() -> None:
     ap.add_argument("--sweep", type=float, default=260.0)
     ap.add_argument("--tris", type=int, default=70000)
     ap.add_argument("--detail-voxel", type=float, default=0.12)
+    ap.add_argument("--gallery", default="", help="write a set of views here")
     ap.add_argument("--name", default="engine_complete")
     args = ap.parse_args()
 
     with open(args.spec, encoding="utf-8") as fh:
         spec = json.load(fh)
     d = design_engine(spec)
+
+    if args.gallery:
+        gallery(d, spec, args.gallery, args.voxel, args.detail_voxel,
+                args.tris, args.sweep)
+        return
     a, ch = d.assembly, d.chamber
     os.makedirs(args.out, exist_ok=True)
 
