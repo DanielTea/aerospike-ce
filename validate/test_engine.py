@@ -260,11 +260,42 @@ def test_wall_is_never_thinner_than_specified(engine):
 
 def test_internal_cavity_stays_inside_the_part(engine):
     """Wall thickness may not eat through the surface or invert past the axis."""
-    w = engine.structure.wall_thickness_mm
     p = engine.profiles["centrebody"]
     assert p.r.min() >= 0.0
-    interior = p.r[p.r > 1e-9]
-    assert interior.min() > 0.5 * w
+    assert engine.cavity_r.max() < engine.inner_wall_r.max()
+
+
+def test_the_cavity_closes_on_the_axis_rather_than_bridging(engine):
+    """
+    The bore ends in a self-supporting cone, not a flat ceiling.
+
+    A flat internal roof is an unsupported bridge the full width of the bore --
+    thirty millimetres on this engine -- and nothing can reach inside a sealed
+    cavity to take supports out afterwards. The cone is why the cavity's last
+    radius is near zero rather than near the bore radius.
+    """
+    r = np.asarray(engine.cavity_r)
+    x = np.asarray(engine.cavity_x)
+    aft = int(np.argmax(x))
+    assert r[aft] < 0.15 * r.max(), "cavity ends in a wide flat ceiling"
+
+
+def test_the_cavity_never_narrows_faster_than_it_can_be_built(engine):
+    """
+    Built head down, the cavity rises through the part, and a void that narrows
+    as it rises hangs material over nothing. The clamp holds it to the process
+    angle; without it the shoulder alone contributes a hundred-odd unsupported
+    facets.
+    """
+    x = np.asarray(engine.cavity_x)
+    r = np.asarray(engine.cavity_r)
+    order = np.argsort(x)
+    x, r = x[order], r[order]
+    dx = np.diff(x)
+    dr = np.diff(r)
+    narrowing = dr < 0.0
+    slope = np.abs(dr[narrowing]) / np.maximum(dx[narrowing], 1e-12)
+    assert slope.max() <= engine.structure.overhang_slope + 1e-6
 
 
 def test_cavity_is_open_at_the_head_so_powder_can_escape(engine):

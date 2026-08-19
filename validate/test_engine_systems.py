@@ -221,6 +221,33 @@ def test_gas_before_coolant_overshoots_badly(chamber):
     assert lag.peak_wall_temp > lead.peak_wall_temp + 100.0
 
 
+def test_implicit_startup_matches_the_explicit_march(chamber):
+    """
+    The scheme changed; the physics did not.
+
+    Explicit marching is bounded by dt < dx^2/(2 alpha), which on a 0.3 mm wall
+    is eighty nanoseconds and twenty-four million steps for a two-second
+    transient -- a minute of wall clock for something an optimiser wants
+    hundreds of times. Backward Euler is unconditionally stable and takes four
+    thousand steps instead. This is what says the answer survived the change,
+    and it is worth the minute it costs to run.
+    """
+    sol = _solve(chamber)
+    fast = TR.solve_startup(sol, duration=0.6, steps_target=1500)
+    slow = TR.solve_startup(sol, duration=0.6, explicit=True)
+    assert fast.peak_wall_temp == pytest.approx(slow.peak_wall_temp, rel=1e-4)
+    assert fast.overshoot == pytest.approx(slow.overshoot, abs=0.05)
+    assert len(fast.time) < len(slow.time) / 100
+
+
+def test_startup_is_step_size_converged(chamber):
+    """Halving the step must not move the answer, or it is not converged."""
+    sol = _solve(chamber)
+    coarse = TR.solve_startup(sol, duration=0.6, steps_target=1000)
+    fine = TR.solve_startup(sol, duration=0.6, steps_target=4000)
+    assert coarse.peak_wall_temp == pytest.approx(fine.peak_wall_temp, rel=1e-3)
+
+
 def test_startup_settles_on_the_steady_answer(chamber):
     """The transient must converge on what the steady solver already said."""
     run = TR.solve_startup(_solve(chamber), coolant_lead=0.2, duration=3.0)

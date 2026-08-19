@@ -176,6 +176,36 @@ def _offset_and_prune(x: np.ndarray, r: np.ndarray, distance, outward: bool,
     return ox[np.asarray(keep)], orr[np.asarray(keep)]
 
 
+def _make_self_supporting(x: np.ndarray, r: np.ndarray, max_slope: float):
+    """
+    Clamp an internal void so it never narrows faster than the process allows.
+
+    Powder-bed fusion builds upward, and the engine is built head down, so the
+    centrebody's internal cavity rises through the part. A void that narrows as
+    it rises leaves material hanging over nothing: the true constant-thickness
+    offset follows the spike, the spike turns hard at the shoulder, and the
+    cavity turns with it at close to a right angle. That is a hundred-odd
+    unsupported facets and a flat internal ceiling nearly thirty millimetres
+    across, none of which can be supported because nothing can reach inside a
+    sealed cavity to remove the supports afterwards.
+
+    The clamp runs backward from the tip: each station may be no wider than the
+    one above it plus `max_slope` times the step. Propagating that way makes the
+    cavity *narrower* upstream than the true offset, never wider, so the wall
+    only ever gains material. Clamping forward instead would leave it wider
+    downstream and quietly thin the wall, which is the same shape and the wrong
+    sign.
+    """
+    x = np.asarray(x, dtype=float).copy()
+    r = np.asarray(r, dtype=float).copy()
+    for i in range(len(x) - 2, -1, -1):
+        dx = x[i + 1] - x[i]
+        if dx <= 0.0:
+            continue
+        r[i] = min(r[i], r[i + 1] + max_slope * dx)
+    return x, r
+
+
 def _erode_polyline(x: np.ndarray, r: np.ndarray, distance: float):
     """
     Inward offset of a surface, with the folded-over part removed.
@@ -229,6 +259,7 @@ class StructureSpec:
     lip_thickness_mm: float = 0.8       # blunt face at the cowl lip
     lip_taper_fraction: float = 0.35    # fraction of the cowl tapered to the lip
     base_cap_thickness_mm: float = 3.0  # solid plug behind the spike truncation
+    overhang_slope: float = 1.0         # dr/dx an internal void may narrow at
     head_thickness_mm: float = 4.0      # closure disc / mounting face
     flange_width_mm: float = 8.0        # radial width beyond the cowl outer wall
 
@@ -488,6 +519,16 @@ def build_assembly(
     if not keep.any():
         raise ValueError("base_cap_thickness_mm leaves no room for the internal cavity")
     cav_x, cav_r = cav_x[keep], cav_r[keep]
+
+    # Close the cavity on the axis rather than with a flat ceiling. A flat
+    # internal roof is a bridge the width of the bore -- thirty millimetres on
+    # this engine -- and nothing can reach inside a sealed cavity to remove
+    # supports afterwards. Appending the apex before clamping lets the same
+    # backward pass cut the closing cone at the self-supporting angle.
+    cav_x = np.append(cav_x, x_cav_end)
+    cav_r = np.append(cav_r, 0.0)
+    cav_x, cav_r = _make_self_supporting(cav_x, cav_r, structure.overhang_slope)
+    cav_x, cav_r = cav_x[cav_r > 1e-9], cav_r[cav_r > 1e-9]
     r_bore = float(cav_r[0])
 
     centrebody = Profile(
@@ -684,6 +725,7 @@ def assembly_from_spec(spec: dict) -> EngineAssembly:
             wall_thickness_mm=g.get("wall_thickness_mm", 2.0),
             lip_thickness_mm=g.get("lip_thickness_mm", 0.8),
             base_cap_thickness_mm=g.get("base_cap_thickness_mm", 3.0),
+            overhang_slope=g.get("overhang_slope", 1.0),
             head_thickness_mm=g.get("head_thickness_mm", 4.0),
             flange_width_mm=g.get("flange_width_mm", 8.0),
         ),
