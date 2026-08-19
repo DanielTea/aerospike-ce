@@ -254,6 +254,8 @@ class EngineAssembly:
     outer_wall_r: np.ndarray
     cavity_x: np.ndarray                # centrebody internal cavity, head to base cap
     cavity_r: np.ndarray
+    cowl_outer_x: np.ndarray            # cowl outer skin, head to lip
+    cowl_outer_r: np.ndarray
 
     # solids
     profiles: dict = field(default_factory=dict)
@@ -443,6 +445,8 @@ def build_assembly(
         outer_wall_r=outer_r,
         cavity_x=cav_x,
         cavity_r=cav_r,
+        cowl_outer_x=cowl_out_x,
+        cowl_outer_r=cowl_out_r,
         profiles={"centrebody": centrebody, "cowl": cowl, "head": head},
         head_x=x_head,
         converging_start_x=x_conv0,
@@ -479,6 +483,81 @@ def measured_flow_area(a: EngineAssembly, n: int = 400):
         k = int(np.argmin(d))
         areas[i] = math.pi * (orr[i] + ir[k]) * d[k]
     return ox, areas
+
+
+def duct_state(a: EngineAssembly, n: int = 240):
+    """
+    Local flow state along each cooled wall, for the thermal model.
+
+    Returns two dicts, "cowl" and "centrebody", each carrying x, r, area_ratio
+    and mach. Area ratio is measured off the built geometry by the same
+    shortest-gap frustum used to prove the duct chokes at the throat, so the
+    thermal model and the geometry check cannot drift apart.
+
+    Mach comes from the area ratio on the subsonic branch upstream of the
+    throat. Downstream, on the spike, the contour already carries its own Mach
+    distribution from the Angelino construction and that is used directly --
+    inverting the area ratio there would throw away the better answer.
+    """
+    from contour_ref import mach_from_area_ratio_subsonic
+
+    c = a.contour
+    gamma_hint = None  # gamma is a gas property; the caller supplies it
+    ox, areas = measured_flow_area(a, n=n)
+    ar = areas / c.throat_area
+    orr = np.interp(ox, np.asarray(a.outer_wall_x), np.asarray(a.outer_wall_r))
+    return {
+        "cowl": {"x": ox, "r": orr, "area_ratio": ar},
+        "centrebody": {
+            "x": np.asarray(a.inner_wall_x, dtype=float),
+            "r": np.asarray(a.inner_wall_r, dtype=float),
+        },
+    }
+
+
+def wall_flow_state(a: EngineAssembly, gamma: float, n: int = 240):
+    """
+    x, r, area ratio and Mach along the cowl and the centrebody.
+
+    The centrebody spans both regimes: subsonic from the head to the shoulder,
+    then the supersonic plug surface, where the contour's own Mach values are
+    authoritative.
+    """
+    from contour_ref import mach_from_area_ratio_subsonic
+
+    c = a.contour
+    d = duct_state(a, n=n)
+
+    cowl = d["cowl"]
+    cowl_mach = np.array([mach_from_area_ratio_subsonic(max(e, 1.0), gamma)
+                          for e in cowl["area_ratio"]])
+
+    ix = np.asarray(a.inner_wall_x, dtype=float)
+    ir = np.asarray(a.inner_wall_r, dtype=float)
+    n_spike = len(c.x)
+    n_up = len(ix) - n_spike
+
+    # upstream of the shoulder the centrebody sees the same duct as the cowl
+    up_ar = np.interp(ix[:n_up], cowl["x"], cowl["area_ratio"])
+    up_mach = np.array([mach_from_area_ratio_subsonic(max(e, 1.0), gamma) for e in up_ar])
+
+    spike_mach = np.asarray(c.mach, dtype=float)
+    spike_ar = np.array([area_ratio_for(m, gamma) for m in spike_mach])
+
+    return {
+        "cowl": {"x": cowl["x"], "r": cowl["r"],
+                 "area_ratio": cowl["area_ratio"], "mach": cowl_mach},
+        "centrebody": {
+            "x": ix, "r": ir,
+            "area_ratio": np.concatenate([up_ar, spike_ar]),
+            "mach": np.concatenate([up_mach, spike_mach]),
+        },
+    }
+
+
+def area_ratio_for(mach: float, gamma: float) -> float:
+    from contour_ref import area_ratio
+    return area_ratio(mach, gamma)
 
 
 def assembly_from_spec(spec: dict) -> EngineAssembly:

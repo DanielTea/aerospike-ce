@@ -37,6 +37,29 @@ namespace AerospikeCE
                  - Math.Atan(Math.Sqrt(m2m1));
         }
 
+        /// <summary>
+        /// Invert the area-Mach relation on the *subsonic* branch.
+        ///
+        /// The area ratio is double valued: one subsonic and one supersonic
+        /// Mach number share every A/A* above 1. Upstream of the throat the
+        /// flow is subsonic, and taking the supersonic root there would put
+        /// Mach 3 in the combustion chamber and make the heat transfer estimate
+        /// meaningless.
+        /// </summary>
+        public static double MachFromAreaRatioSubsonic(double eps, double gamma)
+        {
+            if (eps < 1.0)
+                throw new ArgumentException("expansion ratio must be >= 1");
+            double lo = 1e-6, hi = 1.0;
+            for (int i = 0; i < 400; i++)
+            {
+                double mid = 0.5 * (lo + hi);
+                if (AreaRatio(mid, gamma) > eps) lo = mid; else hi = mid;
+                if (hi - lo < 1e-12) break;
+            }
+            return 0.5 * (lo + hi);
+        }
+
         /// <summary>Invert the area-Mach relation on the supersonic branch.</summary>
         public static double MachFromAreaRatio(double eps, double gamma)
         {

@@ -88,6 +88,29 @@ def mach_from_area_ratio(eps: float, gamma: float, tol: float = 1e-12) -> float:
     return 0.5 * (lo + hi)
 
 
+def mach_from_area_ratio_subsonic(eps: float, gamma: float, tol: float = 1e-12) -> float:
+    """
+    Invert the area-Mach relation on the *subsonic* branch by bisection.
+
+    The area ratio is double valued: one subsonic and one supersonic Mach number
+    share every A/A* above 1. Upstream of the throat the flow is on the subsonic
+    branch, and taking the supersonic root there would put Mach 3 in the
+    combustion chamber and make the heat transfer estimate meaningless.
+    """
+    if eps < 1.0:
+        raise ValueError("expansion ratio must be >= 1")
+    lo, hi = 1e-6, 1.0
+    for _ in range(400):
+        mid = 0.5 * (lo + hi)
+        if area_ratio(mid, gamma) > eps:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < tol:
+            break
+    return 0.5 * (lo + hi)
+
+
 # --------------------------------------------------------------------------
 # contour
 # --------------------------------------------------------------------------
