@@ -14,7 +14,9 @@ python validate/engine_design.py --spec spec/regen.json
 ```
 
 prints the whole design: throat geometry, chamber conditions, thrust and Isp,
-the injector pattern, and a cooling circuit for each wall with its margins.
+the injector pattern, a cooling circuit for each wall with its margins, the
+thermal strain and cycle life of each hot wall, the startup transient, the
+chamber acoustic modes, and the thrust coefficient against altitude.
 
 Built on [PicoGK](https://picogk.org) and the LEAP 71 ShapeKernel, both Apache-2.0.
 
@@ -220,6 +222,43 @@ it, which is what proves the placement.
 Reference: G. Angelino, "Approximate Method for Plug Nozzle Design", AIAA
 Journal 2(10), 1964.
 
+## What else the model knows
+
+**Film cooling.** Eight percent of the fuel runs along the wall. It is what lets
+the chamber be long enough for a sane characteristic length and still be
+coolable, and it is not free: that fuel does not burn at the design mixture
+ratio, so it is charged at a reduced combustion efficiency and shows up as lost
+specific impulse.
+
+**Thermal barrier coatings.** Off by default. YSZ is about 1.0 W/(m K) against
+290 for GRCop-42, so a tenth of a millimetre is worth three millimetres of
+copper -- but the coating surface then runs at 2000 K where the bare metal ran
+at 980, and the design search rejects any coating that would spall.
+
+**Thermal strain and life.** A regen hot wall is *expected* to exceed yield
+every firing; requiring it to stay elastic would reject every chamber ever
+flown. What matters is the plastic strain per cycle, so the criterion is
+Coffin-Manson life against the cycles you need, not elasticity.
+
+**Startup.** The wall diffuses heat in about ten milliseconds, far faster than
+any pressure ramp, so the wall is not the lag. The sequencing is: gas arriving a
+quarter second before the coolant overshoots the wall by several hundred kelvin
+and takes it past its limit. That is a valve sequencing requirement, not a
+preference.
+
+**Stability screening.** Chamber acoustics -- first tangential, longitudinal,
+radial -- plus L\*, residence time and injection stiffness. This is where the
+model discovers that the contraction ratio is not a free parameter: with the
+chamber length it sets L\*, which has to land between about 0.6 and 1.5 m or the
+propellant leaves before it has burned.
+
+**Altitude compensation.** The ideal bell thrust coefficient is the wrong number
+for a plug, and wrong in the direction that matters. Integrating the pressure
+the Angelino construction already gives on the spike surface, and stopping where
+the surface falls below ambient because the plume detaches there, shows the plug
+beating the bell at sea level and converging with it at altitude. That
+truncation *is* the compensation mechanism, expressed geometrically.
+
 ## Meshing, and where it runs out
 
 Two paths. `mesh_export.py` revolves a meridional profile: exact, cheap, and
@@ -228,16 +267,27 @@ distance field and runs marching cubes, which handles the channels and orifices.
 `model/CooledGeometry.cs` carries the same distance functions and hands them
 straight to PicoGK, which renders any bounded implicit into voxels.
 
-The limit is honest and worth knowing: a 0.4 mm channel needs roughly 0.13 mm
-voxels to survive marching cubes with its topology intact, and a whole part at
-that resolution is several gigabytes. Exported at 0.4 mm the channels come out
-broken, which the Euler characteristic reports rather than hides. The injector
-orifices are 1.3 mm and mesh exactly.
+Marching cubes needs about three samples across the narrowest feature, so
+`export_cooled.py` derives the voxel size from the part rather than taking it as
+input: a 0.4 mm channel gives 0.13 mm voxels. The field is built one slab at a
+time, so memory is bounded by the slab and the resolution can be chosen to suit
+the feature instead of the RAM.
 
-So the channel geometry is verified against the distance field directly, in
+The check that matters is the Euler characteristic against what the features
+imply -- one handle per cooling channel, one per injector orifice, on top of the
+base topology of the revolved profile. A channel that has broken through its
+wall, merged with its neighbour, or been closed by over-aggressive decimation
+all leave a mesh that is still watertight and still looks right; the genus is
+what catches them.
+
+Decimation then runs as far as the topology survives and no further. On the head
+that is 5 percent of the triangles at exactly the right genus; at 3 percent the
+quadric collapse closes an orifice and the result is rejected.
+
+The channel geometry is *also* verified against the distance field directly in
 `test_cooled_geometry.py` -- channel count round the circumference, hot wall
-thickness, the wall never breached -- and the STL is treated as something to look
-at rather than something to inspect.
+thickness, the wall never breached -- because that check is exact and costs
+nothing, and a mesh is a poor instrument for a question the field can answer.
 
 ## Suggested first changes
 

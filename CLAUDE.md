@@ -51,7 +51,11 @@ the two is the failure mode this structure exists to prevent.
 | `validate/engine_ref.py` | authoritative assembly geometry | change here first |
 | `validate/combustion_ref.py` | chamber conditions, performance | parametric, not CEA |
 | `validate/injector_ref.py` | element sizing, face layout | |
-| `validate/cooling_ref.py` | Bartz, fins, channel search | correlations, not CFD |
+| `validate/cooling_ref.py` | Bartz, fins, film, coatings, search | correlations, not CFD |
+| `validate/structural_ref.py` | thermal strain and cycle life | screening, not FEA |
+| `validate/transient_ref.py` | startup conduction through the wall | sequencing, not ignition |
+| `validate/stability_ref.py` | chamber acoustics and screens | not a stability prediction |
+| `validate/plug_flow_ref.py` | plug surface pressure, altitude | not method of characteristics |
 | `validate/engine_design.py` | the whole pipeline, one spec in | derives the coolant split |
 | `validate/mesh_solid.py` | SDF + marching cubes | for anything not axisymmetric |
 | `validate/mesh_export.py` | revolve to STL, cutaway PNG | exact, axisymmetric only |
@@ -65,7 +69,11 @@ the two is the failure mode this structure exists to prevent.
 | `model/EngineAssembly.cs` | assembly profiles | mirror of `engine_ref.py` |
 | `model/Combustion.cs` | chamber conditions | mirror of `combustion_ref.py` |
 | `model/Injector.cs` | element sizing | mirror of `injector_ref.py` |
-| `model/Cooling.cs` | cooling solve and search | mirror of `cooling_ref.py` |
+| `model/Cooling.cs` | cooling solve, film, coatings, search | mirror of `cooling_ref.py` |
+| `model/Structural.cs` | thermal strain and cycle life | mirror of `structural_ref.py` |
+| `model/Transient.cs` | startup conduction | mirror of `transient_ref.py` |
+| `model/Stability.cs` | chamber acoustics | mirror of `stability_ref.py` |
+| `model/PlugFlow.cs` | plug surface pressure | mirror of `plug_flow_ref.py` |
 | `model/CooledGeometry.cs` | SDFs for channels and orifices | mirror of `mesh_solid.py` |
 | `model/SpikeGeometry.cs` | PicoGK voxel assembly | geometry only, no physics |
 | `model/Program.cs` | orchestration, logging, export | no engineering logic |
@@ -101,6 +109,30 @@ annulus is not a flow area.
 `engine_ref._distance_to_polyline` and `EngineAssembly.DistanceToPolyline` are
 the honest instruments. Reach for them.
 
+## A construction that works at one parameter value is not verified
+
+The corner fan that builds the cowl wall was tested at a contraction ratio of 3
+and was correct there. At 6 the wall folded back on itself by two microns --
+invisible, geometrically irrelevant, and enough to make every interpolation
+along that wall return a different answer in Python than in C#. It surfaced only
+because the two languages corrupted it differently, and it had already put a
+0.9 mm error into the wall radius the thermal model was using.
+
+Two things follow. Parametrise the geometry tests over the range the spec can
+actually reach, not over the default. And when the C# and the Python disagree,
+the disagreement is the finding: neither being right is the normal case.
+
+## Meshing has a resolution floor, and it is a design constraint
+
+Marching cubes needs about three samples across the narrowest feature. A 0.4 mm
+cooling channel therefore needs 0.13 mm voxels, and a whole part at that size is
+tens of millions of triangles before decimation. That is not a meshing detail,
+it is a reason to prefer a channel the process can hold and an inspection can
+resolve. `export_cooled.py` derives the voxel size from the narrowest feature,
+checks the Euler characteristic against what the features imply, and only
+decimates as far as the topology survives -- pushed further, quadric collapse
+closes a cooling channel and leaves a mesh that still looks perfectly fine.
+
 ## Voxel resolution
 
 `geometry.voxel_size_mm` controls memory cubically. Halving it multiplies memory
@@ -129,12 +161,28 @@ What matters instead is being straight about what each model *is*:
   spray, vaporisation, or combustion stability. The chug check is a
   pressure-drop rule of thumb. Injectors get hot fired; this cannot substitute.
 
-Still genuinely absent, and worth saying so rather than pretending otherwise:
-film cooling, thermal barrier coatings, transient startup, structural analysis
-of a hot wall against a cold jacket, combustion stability, and any
-method-of-characteristics treatment of the plug's altitude compensation. If a
-design needs one of those to close, say so instead of tuning inputs until the
-report looks green.
+Those were once the whole model. It now also carries film cooling, thermal
+barrier coatings, a startup transient, a thermostructural life estimate,
+combustion stability screening, and thrust from the plug surface pressure
+integrated against ambient. Each is a screening model of the same character:
+
+- `film_effectiveness` is a slot correlation, and a real film is worse than any
+  correlation because it is also burning. It is an upper bound.
+- `structural_ref.py` is not finite elements. No creep, no ratchetting
+  accumulation, no build-direction anisotropy, no residual stress from the
+  print. Printed properties vary by more than the margins it reports.
+- `transient_ref.py` has no axial conduction, no jacket heat capacity, no
+  ignition overpressure, no two-phase coolant during priming.
+- `stability_ref.py` computes where the chamber rings and applies the standard
+  screens. There is no combustion response function and no eigenvalue problem.
+  It cannot say an engine is stable. Nothing short of hot fire can.
+- `plug_flow_ref.py` integrates the pressure the Angelino construction already
+  gives. It is not a method of characteristics solve, and the base region behind
+  a truncated spike is not modelled at all though it is worth several percent.
+
+Still genuinely absent: base flow on the truncated plug, combustion response,
+creep, and any real CFD. If a design needs one of those to close, say so instead
+of tuning inputs until the report looks green.
 
 The habit that matters more than any scope line: when a model cannot make a
 design work, report that. `engine_design.py` returns no cooling circuit at all
