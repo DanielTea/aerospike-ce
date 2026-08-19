@@ -23,10 +23,8 @@ If a change is not covered by one of these, add coverage before making it.
 The Python in `validate/` is the source of truth for the physics. The C# in
 `model/` is a port. When changing engineering behaviour:
 
-1. Change `validate/contour_ref.py` (nozzle physics) or `validate/engine_ref.py`
-   (assembly geometry).
-2. Add or update a test in `validate/test_contour.py`, `validate/test_engine.py`,
-   or `validate/test_mesh.py`.
+1. Change the relevant `validate/*_ref.py`. That is the source of truth.
+2. Add or update a test in the matching `validate/test_*.py`.
 3. Run `pytest` from inside `validate/`. Make it pass.
 4. Run `python plot_contour.py --spec ../spec/demo.json --out ../out`, then
    `python plot_engine.py`, then `python mesh_export.py`.
@@ -51,15 +49,24 @@ the two is the failure mode this structure exists to prevent.
 | `spec/*.json` | descriptive input | the only file a *user* edits |
 | `validate/contour_ref.py` | authoritative nozzle physics | change here first |
 | `validate/engine_ref.py` | authoritative assembly geometry | change here first |
-| `validate/test_contour.py` | contour invariants | add a test before adding physics |
-| `validate/test_engine.py` | assembly invariants | add a test before adding geometry |
-| `validate/test_mesh.py` | mesh closure and topology | |
+| `validate/combustion_ref.py` | chamber conditions, performance | parametric, not CEA |
+| `validate/injector_ref.py` | element sizing, face layout | |
+| `validate/cooling_ref.py` | Bartz, fins, channel search | correlations, not CFD |
+| `validate/engine_design.py` | the whole pipeline, one spec in | derives the coolant split |
+| `validate/mesh_solid.py` | SDF + marching cubes | for anything not axisymmetric |
+| `validate/mesh_export.py` | revolve to STL, cutaway PNG | exact, axisymmetric only |
+| `validate/test_*.py` | invariants | add a test before adding physics |
 | `validate/plot_contour.py` | contour PNG | your eyes on the nozzle |
 | `validate/plot_engine.py` | assembly PNG + area schedule | your eyes on the engine |
-| `validate/mesh_export.py` | revolve to STL, cutaway PNG | fallback path, no PicoGK needed |
+| `validate/plot_cooled.py` | section views through the field | your eyes on the channels |
+| `validate/export_cooled.py` | cooled STLs + topology check | |
 | `model/GasDynamics.cs` | isentropic + Prandtl-Meyer | mirror of the Python |
 | `model/PlugContour.cs` | contour construction | mirror of the Python |
 | `model/EngineAssembly.cs` | assembly profiles | mirror of `engine_ref.py` |
+| `model/Combustion.cs` | chamber conditions | mirror of `combustion_ref.py` |
+| `model/Injector.cs` | element sizing | mirror of `injector_ref.py` |
+| `model/Cooling.cs` | cooling solve and search | mirror of `cooling_ref.py` |
+| `model/CooledGeometry.cs` | SDFs for channels and orifices | mirror of `mesh_solid.py` |
 | `model/SpikeGeometry.cs` | PicoGK voxel assembly | geometry only, no physics |
 | `model/Program.cs` | orchestration, logging, export | no engineering logic |
 | `out/` | generated artifacts | never commit, never hand-edit |
@@ -73,24 +80,66 @@ truth. It revolves what `engine_ref.py` already decided. If it and
 `SpikeGeometry.cs` disagree about a shape, both are wrong until `engine_ref.py`
 says otherwise.
 
+`mesh_solid.py` and `model/CooledGeometry.cs` carry the *same* distance
+functions, deliberately. PicoGK renders any bounded implicit into voxels, so the
+C# hands the kernel the identical formulation rather than booleaning several
+hundred channel solids and keeping a second description of the same geometry in
+step with the first.
+
+## Measure perpendicular, not radially
+
+This has now caused two separate bugs, so it is worth stating as a rule. Where a
+surface is inclined, a radial measurement is not a thickness and a radial
+annulus is not a flow area.
+
+- The throat is the sonic line from the cowl lip to the spike shoulder, at nu_e
+  from radial. Read radially it measures 2.6 times too small.
+- The cowl wall at the lip is 1.0 mm thick. Read radially it measures 2.99 mm,
+  which cleared cooling channels to run somewhere they would have emerged
+  straight through the taper.
+
+`engine_ref._distance_to_polyline` and `EngineAssembly.DistanceToPolyline` are
+the honest instruments. Reach for them.
+
 ## Voxel resolution
 
 `geometry.voxel_size_mm` controls memory cubically. Halving it multiplies memory
 roughly eightfold. Default to 0.2 mm while iterating. Do not drop below 0.05 mm
 without being asked, and warn before you do.
 
-## Things that are out of scope
+## Scope
 
-Do not add combustion modelling, injector design, propellant selection, cooling
-channel sizing, or thrust prediction. This model generates nozzle geometry for
-printed demonstrators. If asked to extend into those areas, say so and stop.
+This used to stop at nozzle geometry. That restriction was lifted deliberately,
+so the model now covers combustion conditions, delivered performance, injector
+element sizing, and regenerative cooling as well. Do not reinstate the old limit
+on the basis of a stale comment somewhere.
 
-The line is between *geometry* and *the engineering that would size it*. An
-annular chamber volume set by a stated contraction ratio is geometry, and is in.
-A chamber sized from a chosen propellant and chamber pressure is not. The head
-disc is a blank closure for the same reason: give it an orifice pattern and it
-becomes injector design, which is out. When a request straddles the line, build
-the geometry, say plainly which part you did not build, and why.
+What matters instead is being straight about what each model *is*:
+
+- `combustion_ref.py` is a parametric performance model with tabulated
+  propellant data. There is no Gibbs minimisation and no thermochemical
+  database. It is right about trends and about the identities; it is a fit in
+  the wings. Real work substitutes CEA or RPA output through the spec, which
+  every routine accepts as input for exactly that reason.
+- `cooling_ref.py` stands on Bartz and Dittus-Boelter. Both are correlations.
+  Bartz is quoted at plus or minus thirty percent and is being applied to an
+  annular throat with a hydraulic diameter substituted for the throat diameter.
+  A design that only just passes on Bartz has not passed.
+- `injector_ref.py` sizes orifices and balances momentum. It does not model
+  spray, vaporisation, or combustion stability. The chug check is a
+  pressure-drop rule of thumb. Injectors get hot fired; this cannot substitute.
+
+Still genuinely absent, and worth saying so rather than pretending otherwise:
+film cooling, thermal barrier coatings, transient startup, structural analysis
+of a hot wall against a cold jacket, combustion stability, and any
+method-of-characteristics treatment of the plug's altitude compensation. If a
+design needs one of those to close, say so instead of tuning inputs until the
+report looks green.
+
+The habit that matters more than any scope line: when a model cannot make a
+design work, report that. `engine_design.py` returns no cooling circuit at all
+rather than the least-bad one, because a quietly returned melted engine is worse
+than a refusal.
 
 ## Conventions
 

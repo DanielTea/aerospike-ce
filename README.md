@@ -1,12 +1,20 @@
 # aerospike-ce
 
-A minimal Computational Engineering model in the LEAP 71 style: a JSON spec goes
-in, a complete aerospike engine geometry comes out. No sketches, no feature tree,
-no mouse.
+A Computational Engineering model in the LEAP 71 style: a JSON spec goes in, a
+complete regeneratively cooled aerospike engine comes out. No sketches, no
+feature tree, no mouse.
 
-Three parts, all derived: a hollow centrebody carrying the Angelino plug contour,
-a cowl forming the outer side of the annular chamber and of the throat, and a
-head disc that closes the chamber and provides the mounting face.
+Three printed parts, all derived: a hollow centrebody carrying the Angelino plug
+contour, a cowl forming the outer side of the annular chamber and of the throat,
+and a head disc that closes the chamber, carries the injector and provides the
+mounting face. Both walls are regeneratively cooled by the fuel.
+
+```bash
+python validate/engine_design.py --spec spec/regen.json
+```
+
+prints the whole design: throat geometry, chamber conditions, thrust and Isp,
+the injector pattern, and a cooling circuit for each wall with its margins.
 
 Built on [PicoGK](https://picogk.org) and the LEAP 71 ShapeKernel, both Apache-2.0.
 
@@ -15,6 +23,11 @@ Built on [PicoGK](https://picogk.org) and the LEAP 71 ShapeKernel, both Apache-2
 **Is:** a working skeleton of the paradigm. Descriptive input, codified
 engineering knowledge, generated voxel geometry, printable STL, and a validation
 harness that lets a coding agent iterate without seeing the model.
+
+**Is:** a model that will tell you your design does not work. `spec/demo.json`
+cannot be regeneratively cooled by its own fuel flow at any channel geometry, and
+the model reports that rather than returning the least-bad circuit. Getting a
+refusal out of a generator is the point of building one.
 
 **Is not:** Noyron. LEAP 71's actual value is thousands of hours of propulsion
 knowledge encoded into a proprietary model. This repo contains one textbook
@@ -95,6 +108,66 @@ volume. `dotnet run` voxelises the same profiles in PicoGK, which is the real
 pipeline and the one that can do boolean work the mesher cannot. Use the Python
 path when you have no PicoGK runtime, or as a cross-check when you do.
 
+## Two specs
+
+`spec/demo.json` is the geometry demonstrator: 30 mm exit radius, uncooled, the
+smallest thing that shows the paradigm. `spec/regen.json` is a working engine at
+75 mm, 25 bar, LOX/methane, about 7.6 kN at sea level, with both walls cooled.
+
+The gap between them is instructive. Ask for cooling on the demo spec and you get:
+
+```
+heat load 241 kW exceeds what the fuel can absorb (189 kW). No channel geometry
+fixes that: the engine needs more mass flow, a higher chamber pressure, film
+cooling, or to be larger.
+```
+
+That is not a modelling failure, it is why small engines are ablative or film
+cooled and large ones are regenerative. Heat load grows with wetted area while
+coolant capacity grows with mass flow, and the ratio only comes right with size
+and chamber pressure. `regen.json` also runs at mixture ratio 2.4 against a c*
+peak of 3.4: deliberately fuel-rich, buying coolant mass flow at the cost of
+about 4 s of specific impulse. Every regeneratively cooled engine makes that
+trade.
+
+## Cooling
+
+Channels are not sized by picking a coolant velocity. On a small engine that is
+actively misleading: velocity fixes the flow area, the flow area fixes the
+channel count, and a low count on a fixed circumference leaves lands wider than
+the channels, at which point the fin efficiency of the ribs decides the wall
+temperature no matter how fast the coolant goes. Chasing velocity produced a
+0.077 mm deep channel and a 236 bar pressure drop on a 20 bar chamber.
+
+So `cooling_ref.py` searches instead. It packs the circumference at each
+candidate width and land, sweeps depth, hot wall and material, and keeps only
+what survives on wall temperature, coolant temperature, pressure drop and
+turbulence. The winner for `regen.json` lands at a land-to-channel ratio of about
+one, which is where real regen chambers sit.
+
+The fuel split between the two circuits is derived, not specified. The
+centrebody carries the chamber wall *and* the whole plug surface, so it needs
+about 55 percent; an even split starves it while the cowl sits comfortable.
+
+## The injector
+
+Momentum-balanced unlike doublets on the annular face. The two streams do not
+carry equal momentum, so splitting the included angle evenly throws the resultant
+about 11 degrees off axis, which streaks the chamber and drives one side of the
+wall hot. The angles are solved to cancel the transverse components instead:
+
+```
+a_fuel = atan2( m_ox sin(total),  m_fuel + m_ox cos(total) )
+```
+
+The heavier stream takes the shallower angle, which is the physical result, and
+the resultant lands on the axis to machine precision rather than by tuning.
+
+An annular chamber gives an injector very little radial room, so the pattern is
+usually constrained by the face rather than by the flow. `fit_injector_to_face`
+searches element count and impingement geometry and reports what fits, or says
+plainly that nothing does.
+
 ## The chamber
 
 The plug contour only describes the supersonic surface. Feeding it needs an
@@ -147,6 +220,25 @@ it, which is what proves the placement.
 Reference: G. Angelino, "Approximate Method for Plug Nozzle Design", AIAA
 Journal 2(10), 1964.
 
+## Meshing, and where it runs out
+
+Two paths. `mesh_export.py` revolves a meridional profile: exact, cheap, and
+incapable of anything that varies with angle. `mesh_solid.py` evaluates a signed
+distance field and runs marching cubes, which handles the channels and orifices.
+`model/CooledGeometry.cs` carries the same distance functions and hands them
+straight to PicoGK, which renders any bounded implicit into voxels.
+
+The limit is honest and worth knowing: a 0.4 mm channel needs roughly 0.13 mm
+voxels to survive marching cubes with its topology intact, and a whole part at
+that resolution is several gigabytes. Exported at 0.4 mm the channels come out
+broken, which the Euler characteristic reports rather than hides. The injector
+orifices are 1.3 mm and mesh exactly.
+
+So the channel geometry is verified against the distance field directly, in
+`test_cooled_geometry.py` -- channel count round the circumference, hot wall
+thickness, the wall never breached -- and the STL is treated as something to look
+at rather than something to inspect.
+
 ## Suggested first changes
 
 1. Sweep `truncate_fraction` from 1.0 down to 0.15 and watch the length collapse
@@ -158,9 +250,15 @@ Journal 2(10), 1964.
    at the spike shoulder folds over completely; the erosion in `engine_ref.py`
    prunes it, and `test_wall_is_never_thinner_than_specified` is what stops that
    pruning from quietly eating the wall.
-5. Then the real exercise: derive `contraction_ratio` and `converging_length_mm`
-   from an actual requirement rather than accepting them as input. That is the
-   step where this stops being a shape generator and starts being a model.
+5. Sweep `operation.mixture_ratio` on `regen.json` from 2.2 to 3.4 and watch the
+   cooling margins collapse as the specific impulse rises. That trade is the
+   whole reason the demo runs fuel-rich.
+6. Add film cooling. It is the missing piece that would let a small engine close,
+   and its absence is why `demo.json` cannot be cooled at all.
+7. Then the real exercise: derive `contraction_ratio`, `converging_length_mm` and
+   the mixture ratio from an actual requirement rather than accepting them as
+   input. That is the step where this stops being a shape generator and starts
+   being a model.
 
 ## License
 
