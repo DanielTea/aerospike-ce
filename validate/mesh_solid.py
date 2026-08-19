@@ -25,6 +25,7 @@ demanding exactness.
 from __future__ import annotations
 
 import math
+import struct
 from dataclasses import dataclass
 
 import numpy as np
@@ -457,6 +458,8 @@ def build_mesh_streaming(
     slab_planes: int = 12,
     radial_samples: int = 6000,
     progress: bool = False,
+    bbox: tuple[float, float, float, float] | None = None,
+    keep_sector: tuple[float, float] | None = None,
 ):
     """
     Marching cubes over the volume in slabs, welded into one mesh.
@@ -483,16 +486,24 @@ def build_mesh_streaming(
     # any mismatch shifts each slab slightly against the next and the shared
     # plane's vertices no longer coincide -- the weld then fails and the mesh
     # reports boundary edges along every slab seam.
+    # A sector needs only its own corner of the (y, z) plane. On an annular part
+    # the full square is mostly the empty middle, so restricting it is worth
+    # more than twenty times in both memory and time -- which is what makes
+    # verifying a sector at inspection resolution affordable at all.
+    y0, y1, z0, z1 = bbox if bbox is not None else (-r_max, r_max, -r_max, r_max)
+
     nx = max(2, int(math.ceil((x1 - x0) / voxel_mm)) + 1)
-    ny = max(2, int(math.ceil(2.0 * r_max / voxel_mm)) + 1)
+    ny = max(2, int(math.ceil((y1 - y0) / voxel_mm)) + 1)
+    nz = max(2, int(math.ceil((z1 - z0) / voxel_mm)) + 1)
 
     xs = x0 + np.arange(nx) * voxel_mm
-    ys = -r_max + np.arange(ny) * voxel_mm
-    Y, Z = np.meshgrid(ys, ys, indexing="ij")
+    ys = y0 + np.arange(ny) * voxel_mm
+    zs = z0 + np.arange(nz) * voxel_mm
+    Y, Z = np.meshgrid(ys, zs, indexing="ij")
     R = np.hypot(Y, Z)
     TH = np.arctan2(Z, Y)
 
-    r_grid = np.linspace(0.0, float(np.hypot(ys, ys).max()) * 1.001, radial_samples)
+    r_grid = np.linspace(0.0, float(R.max()) * 1.001, radial_samples)
     vx = np.asarray(profile.x, dtype=float)
     vr = np.asarray(profile.r, dtype=float)
 
@@ -510,9 +521,18 @@ def build_mesh_streaming(
             d = np.maximum(d, -_port_sdf(X, R.astype(np.float32),
                                          TH.astype(np.float32), pt))
         if cut_sector is not None:
+            # remove the wedge: this is the cutaway view
             d = np.maximum(d, -_wedge_sdf(Y.astype(np.float32),
                                           Z.astype(np.float32),
                                           cut_sector[0], cut_sector[1]))
+        if keep_sector is not None:
+            # intersect with the wedge: this is a sample of the part, and it is
+            # the opposite operation. Subtracting where you meant to intersect
+            # leaves everything except the sector, which still meshes, still
+            # looks like a wedge of engine, and has entirely the wrong topology.
+            d = np.maximum(d, _wedge_sdf(Y.astype(np.float32),
+                                         Z.astype(np.float32),
+                                         keep_sector[0], keep_sector[1]))
         return d
 
     all_v: list[np.ndarray] = []
@@ -533,7 +553,7 @@ def build_mesh_streaming(
         if block.min() < 0.0 < block.max():
             v, f, _, _ = marching_cubes(block, level=0.0,
                                         spacing=(voxel_mm, voxel_mm, voxel_mm))
-            v = v + np.array([xs[i0], ys[0], ys[0]])
+            v = v + np.array([xs[i0], ys[0], zs[0]])
             all_v.append(v)
             all_f.append(f.astype(np.int64) + offset)
             offset += len(v)
@@ -599,3 +619,177 @@ def feed_ports(a: EngineAssembly, cut: ChannelCut, diameter_mm: float | None = N
         r_hi = wall - cut.hot_wall_mm
     return PortCut(x_at=x_at, diameter_mm=d, count=cut.n_channels,
                    r_lo=r_lo, r_hi=r_hi, phase=0.0)
+
+
+def stream_mesh_to_stl(
+    path: str,
+    profile: Profile,
+    voxel_mm: float = 0.13,
+    channels: list[ChannelCut] | None = None,
+    holes: list[HoleCut] | None = None,
+    ports: list[PortCut] | None = None,
+    margin_mm: float = 1.0,
+    slab_planes: int = 12,
+    radial_samples: int = 6000,
+):
+    """
+    Mesh straight to a binary STL, one slab at a time, without ever holding the
+    whole mesh.
+
+    At inspection resolution a part this size runs to tens of millions of
+    triangles, and welding them needs the entire mesh plus a sort workspace --
+    about twelve gigabytes for the cowl alone, which is how the first attempt
+    died. STL is a triangle soup with no shared vertices, so nothing has to be
+    welded to write it: each slab can be appended and dropped.
+
+    The cost is that the file cannot be topology-checked as it is written, since
+    genus needs shared vertices. `build_mesh_streaming` on a sector does that
+    instead -- the features are periodic, so one sector settles the pattern.
+
+    Returns the triangle count.
+    """
+    channels = channels or []
+    holes = holes or []
+    ports = ports or []
+
+    x0 = float(profile.x.min()) - margin_mm
+    x1 = float(profile.x.max()) + margin_mm
+    r_max = float(profile.r.max()) + margin_mm
+
+    nx = max(2, int(math.ceil((x1 - x0) / voxel_mm)) + 1)
+    ny = max(2, int(math.ceil(2.0 * r_max / voxel_mm)) + 1)
+    xs = x0 + np.arange(nx) * voxel_mm
+    ys = -r_max + np.arange(ny) * voxel_mm
+
+    Y, Z = np.meshgrid(ys, ys, indexing="ij")
+    R = np.hypot(Y, Z).astype(np.float32)
+    TH = np.arctan2(Z, Y).astype(np.float32)
+    Yf, Zf = Y.astype(np.float32), Z.astype(np.float32)
+
+    r_grid = np.linspace(0.0, float(R.max()) * 1.001, radial_samples)
+    vx = np.asarray(profile.x, dtype=float)
+    vr = np.asarray(profile.r, dtype=float)
+
+    def plane(i: int) -> np.ndarray:
+        d = np.interp(R, r_grid, _polygon_sdf_radial(xs[i], r_grid, vx, vr)).astype(np.float32)
+        X = np.full(R.shape, xs[i], dtype=np.float32)
+        for c in channels:
+            d = np.maximum(d, -_channel_sdf(X, R, TH, c))
+        for h in holes:
+            d = np.maximum(d, -_hole_sdf(X, Yf, Zf, h))
+        for pt in ports:
+            d = np.maximum(d, -_port_sdf(X, R, TH, pt))
+        return d
+
+    rec_dtype = np.dtype([("n", "<f4", 3), ("a", "<f4", 3),
+                          ("b", "<f4", 3), ("c", "<f4", 3), ("attr", "<u2")])
+    total = 0
+
+    with open(path, "wb") as fh:
+        fh.write(b"aerospike inspection mesh".ljust(80, b"\0"))
+        fh.write(struct.pack("<I", 0))              # patched at the end
+
+        i0 = 0
+        carry = plane(0)
+        while i0 < nx - 1:
+            i1 = min(i0 + max(1, slab_planes), nx - 1)
+            block = np.empty((i1 - i0 + 1,) + R.shape, dtype=np.float32)
+            block[0] = carry
+            for k in range(i0 + 1, i1 + 1):
+                block[k - i0] = plane(k)
+            carry = block[-1].copy()
+
+            if block.min() < 0.0 < block.max():
+                v, f, _, _ = marching_cubes(block, level=0.0,
+                                            spacing=(voxel_mm, voxel_mm, voxel_mm))
+                v = v + np.array([xs[i0], ys[0], ys[0]])
+                a, b, c = v[f[:, 0]], v[f[:, 1]], v[f[:, 2]]
+                nrm = np.cross(b - a, c - a)
+                ln = np.linalg.norm(nrm, axis=1)
+                ln[ln < 1e-20] = 1.0
+                nrm /= ln[:, None]
+
+                rec = np.zeros(len(f), dtype=rec_dtype)
+                rec["n"], rec["a"], rec["b"], rec["c"] = nrm, a, b, c
+                fh.write(rec.tobytes())
+                total += len(f)
+                del v, f, a, b, c, nrm, rec
+            del block
+            i0 = i1
+
+        fh.seek(80)
+        fh.write(struct.pack("<I", total))
+
+    return total
+
+
+def sector_of(profile: Profile, n_features: int, n_take: int,
+              margin_mm: float = 8.0):
+    """
+    An angular window holding exactly `n_take` whole features, and a bounding
+    box that just contains it.
+
+    The window edges land halfway between features, so no channel is sliced by
+    the cut. That matters: a sliced channel is an open groove rather than a
+    tunnel and contributes nothing to the genus, which would make the count the
+    check is trying to verify come out wrong for a part that is perfectly fine.
+
+    The margin has to clear the feed ports, which run several millimetres proud
+    of the outer skin. Too tight a box truncates them, the mesh is left open
+    where they leave, and the genus comes out short by however many ports were
+    clipped -- a failure that looks exactly like missing channels.
+    """
+    pitch = 2.0 * math.pi / n_features
+    th0 = 0.5 * pitch
+    th1 = th0 + n_take * pitch
+    r_max = float(profile.r.max()) + margin_mm
+
+    angles = np.linspace(th0, th1, 200)
+    ys = r_max * np.cos(angles)
+    zs = r_max * np.sin(angles)
+    corners_y = np.concatenate([ys, [0.0]])
+    corners_z = np.concatenate([zs, [0.0]])
+    pad = margin_mm
+    return (th0, th1), (float(corners_y.min()) - pad, float(corners_y.max()) + pad,
+                        float(corners_z.min()) - pad, float(corners_z.max()) + pad)
+
+
+def expected_channel_volume(cut: ChannelCut) -> float:
+    """
+    Volume a channel ring removes, integrated along the wall it rides.
+
+    The channel follows the contour, so its length is the arc of the wall
+    between its end stations rather than the axial span, and its width is the
+    clamped width at each radius. Summing over the ring gives a number the mesh
+    can be checked against without any topology bookkeeping -- which matters,
+    because genus is exquisitely sensitive to whether a feature happens to break
+    the surface and volume simply is not.
+    """
+    x = np.asarray(cut.wall_x, dtype=float)
+    r = np.asarray(cut.wall_r, dtype=float)
+    inside = (x >= cut.x_start) & (x <= cut.x_end)
+    if inside.sum() < 2:
+        return 0.0
+    xs, rs = x[inside], r[inside]
+
+    ds = np.hypot(np.diff(xs), np.diff(rs))
+    r_mid = 0.5 * (rs[:-1] + rs[1:])
+    arc = 2.0 * math.pi * r_mid / cut.n_channels
+    width = np.minimum(cut.width_mm, np.maximum(arc - cut.land_mm, 0.0))
+    return float(cut.n_channels * np.sum(width * cut.height_mm * ds))
+
+
+def expected_port_volume(cut: ChannelCut, port: PortCut) -> float:
+    """
+    Volume the feed ports remove, counting only the part inside the wall.
+
+    The port is modelled as a square bore of the port diameter running from the
+    channel floor out through the skin; beyond the skin it is cutting air and
+    removes nothing.
+    """
+    wall = float(np.interp(port.x_at, cut.wall_x, cut.wall_r))
+    if cut.outward:
+        span = max(min(port.r_hi, wall + 6.0) - port.r_lo, 0.0)
+    else:
+        span = max(port.r_hi - max(port.r_lo, wall - 6.0), 0.0)
+    return float(port.count * port.diameter_mm * port.diameter_mm * span)
