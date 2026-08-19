@@ -145,6 +145,54 @@ def test_cowl_wall_never_doubles_back(engine):
     assert np.all(np.diff(engine.outer_wall_x) > -1e-9)
 
 
+@pytest.mark.parametrize("cr", [2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 20.0])
+def test_cowl_wall_never_doubles_back_at_any_contraction_ratio(contour, cr):
+    """
+    The original test only ever ran at the default contraction ratio of 3, and
+    the fold does not appear until 6. Everything downstream interpolates along
+    this wall, so a fold of a couple of microns is enough to hand the thermal
+    model a wall radius that is a millimetre wrong.
+
+    The fold turned out not to depend on the converging length at all -- it is
+    set by how large the offset distance is when the corner fan starts rotating,
+    which is why the fan start is now derived from the area schedule rather than
+    fixed. One converging length across every ratio is the point of the test.
+    """
+    a = build_assembly(contour, ChamberSpec(contraction_ratio=cr,
+                                            converging_length_mm=35.0))
+    assert np.all(np.diff(a.outer_wall_x) > -1e-9)
+    # and the fix must not have moved the lip while straightening the wall
+    assert a.outer_wall_x[-1] == pytest.approx(contour.lip_x, rel=1e-9)
+    assert a.outer_wall_r[-1] == pytest.approx(contour.exit_radius, rel=1e-12)
+
+
+@pytest.mark.parametrize("cr", [2.0, 6.0, 12.0, 20.0])
+def test_the_duct_still_chokes_at_the_throat_at_any_contraction_ratio(contour, cr):
+    """
+    Moving the fan start must not disturb what the fan was for. Whatever the
+    contraction ratio, the measured minimum flow area is still the throat area
+    and it is still at the lip.
+    """
+    a = build_assembly(contour, ChamberSpec(contraction_ratio=cr,
+                                            converging_length_mm=35.0))
+    x, areas = measured_flow_area(a, n=300)
+    assert areas.min() == pytest.approx(contour.throat_area, rel=2e-3)
+    assert x[int(np.argmin(areas))] == pytest.approx(contour.lip_x, abs=0.1)
+
+
+@pytest.mark.parametrize("cr", [2.0, 6.0, 12.0, 20.0])
+def test_the_cowl_outer_skin_does_not_fold_either(contour, cr):
+    """
+    The inner wall is not the only offset in this part. The outer skin is the
+    inner wall pushed outward through the throat turn, which is a concave corner
+    and folds there exactly as the cavity folds at the convex shoulder.
+    """
+    a = build_assembly(contour, ChamberSpec(contraction_ratio=cr,
+                                            converging_length_mm=35.0))
+    assert np.all(np.diff(a.cowl_outer_x) > -1e-9)
+    assert not _segments_self_intersect(a.profiles["cowl"].x, a.profiles["cowl"].r)
+
+
 def test_both_walls_are_printable_without_support(engine):
     """
     Printed head-down, x is the build direction. Every outward-facing surface

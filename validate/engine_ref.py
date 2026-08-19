@@ -125,6 +125,57 @@ def _distance_to_polyline(px: np.ndarray, pr: np.ndarray,
     return np.min(np.hypot(px[:, None] - cx, pr[:, None] - cr), axis=1)
 
 
+def _offset_and_prune(x: np.ndarray, r: np.ndarray, distance, outward: bool,
+                      keep_ends: bool = False):
+    """
+    Offset a polyline and remove the part that folded over.
+
+    An offset is only valid where the offset distance is smaller than the local
+    radius of curvature. Inward, that fails at a convex corner; outward, it
+    fails at a concave one. The cowl has both -- the spike shoulder on the
+    inside and the throat turn on the outside -- so the same repair is needed in
+    both directions and it is the same repair: drop every offset point that
+    ended up nearer the original surface than it was asked to be, since a folded
+    point always is, then keep only points that advance in x.
+
+    `distance` may be a scalar or one value per vertex, which is what the cowl's
+    taper to a thin lip needs. `keep_ends` preserves the first and last points
+    regardless, because on the cowl the last one is the lip and moving it breaks
+    the identity the whole contraction is built to satisfy.
+    """
+    dist = np.broadcast_to(np.asarray(distance, dtype=float), x.shape)
+    nx, nr = _vertex_normals(x, r, outward)
+    ox = x + dist * nx
+    orr = r + dist * nr
+
+    true_d = _distance_to_polyline(ox, orr, x, r)
+    valid = true_d >= dist - 1e-6
+    valid &= orr > 0.0
+    if keep_ends:
+        valid[0] = valid[-1] = True
+    if not valid.any():
+        raise ValueError("the offset consumes the whole section")
+
+    idx = np.flatnonzero(valid)
+    keep = []
+    run = -np.inf
+    for i in idx:
+        if ox[i] > run:
+            keep.append(i)
+            run = ox[i]
+
+    if keep_ends and keep:
+        # The lip must survive, and it must remain the last station. Simply
+        # appending it puts it behind whatever already passed it, which is a
+        # backward step of a fraction of a micron -- small enough to look like
+        # nothing and large enough to make x non-monotonic again.
+        last = idx[-1]
+        keep = [i for i in keep if ox[i] < ox[last]]
+        keep.append(last)
+
+    return ox[np.asarray(keep)], orr[np.asarray(keep)]
+
+
 def _erode_polyline(x: np.ndarray, r: np.ndarray, distance: float):
     """
     Inward offset of a surface, with the folded-over part removed.
@@ -282,7 +333,7 @@ def _contraction_wall(
     chamber_area: float,
     converging_length_mm: float,
     n: int = 200,
-    corner_fan_start: float = 0.65,
+    fan_area_ratio: float = 1.5,
 ):
     """
     Cowl inner surface through the contraction, solved from an area schedule.
@@ -302,10 +353,20 @@ def _contraction_wall(
     0.47 * A_t just aft of the shoulder, which is a worse choke than the naive
     straight cone it was meant to replace.
 
+    Where the fan begins is not a free constant. Through the fan the station
+    sits at x = d sin(theta), and if the fan starts while the offset distance d
+    is still large that product overshoots the lip and comes back -- the wall
+    folds. A fixed start works at a contraction ratio of 3 and fails at 8,
+    whatever the converging length, because the fold is set by how big d is when
+    the rotation begins and not by how much axial room there is. So the fan is
+    started where the schedule has already brought the area down to
+    `fan_area_ratio` times the throat, which bounds d and keeps the wall
+    single-valued at any contraction ratio.
+
     Returns (x, r, area), area being the prescribed frustum area at each station.
     """
-    if not 0.0 < corner_fan_start < 1.0:
-        raise ValueError("corner_fan_start must be in (0, 1)")
+    if fan_area_ratio <= 1.0:
+        raise ValueError("fan_area_ratio must exceed 1")
 
     r0 = c.r[0]
     nu_e = c.throat_angle
@@ -313,6 +374,18 @@ def _contraction_wall(
 
     s = np.linspace(0.0, 1.0, n)
     area = chamber_area + (a_t - chamber_area) * _smoothstep(s)
+
+    # start the fan where the area schedule reaches fan_area_ratio * A_t
+    target = min(fan_area_ratio * a_t, chamber_area)
+    want = (chamber_area - target) / (chamber_area - a_t)
+    lo, hi = 0.0, 1.0
+    for _ in range(200):                     # invert smoothstep by bisection
+        mid = 0.5 * (lo + hi)
+        if _smoothstep(mid) < want:
+            lo = mid
+        else:
+            hi = mid
+    corner_fan_start = min(max(0.5 * (lo + hi), 1e-6), 1.0 - 1e-6)
 
     # phase A: anchor walks the cylinder to the shoulder and stops there
     x_anchor = -converging_length_mm * (1.0 - np.minimum(s / corner_fan_start, 1.0))
@@ -327,7 +400,34 @@ def _contraction_wall(
 
     x = x_anchor + d * np.sin(theta)
     r = r0 + d * cos_t
-    return x, r, area
+
+    # The offset locus can curl back on itself near the throat: through the fan
+    # the offset distance is shrinking while the direction is still rotating, so
+    # x = d sin(theta) passes a maximum before the last station. It is small --
+    # two microns at a contraction ratio of 6, thirteen at 8 -- and completely
+    # invisible geometrically, but a non-monotonic x silently corrupts every
+    # interpolation that walks this wall, which is all of them. It cost a 0.9 mm
+    # error in the wall radius handed to the thermal model, and it only surfaced
+    # because the C# and the Python interpolators corrupted it differently.
+    fold = float(np.max(np.maximum.accumulate(x) - x))
+    if fold > 0.05:
+        raise ValueError(
+            f"the cowl wall folds back {fold:.3f} mm through the contraction. The "
+            f"corner fan no longer fits: lower contraction_ratio or lengthen "
+            f"converging_length_mm")
+    # Drop the overshoot rather than flatten it. Clamping leaves a plateau of
+    # points sharing one x with different r, and r(x) is then multi-valued right
+    # at the lip -- which two interpolators will resolve two different ways.
+    # Walking back from the last station and keeping only points that are
+    # strictly upstream of everything after them removes the fold, keeps the
+    # lip, and leaves x strictly increasing.
+    keep = np.zeros(len(x), dtype=bool)
+    run = math.inf
+    for i in range(len(x) - 1, -1, -1):
+        if x[i] < run:
+            keep[i] = True
+            run = x[i]
+    return x[keep], r[keep], area[keep]
 
 
 def build_assembly(
@@ -413,9 +513,10 @@ def build_assembly(
     tail = _smoothstep(np.linspace(0.0, 1.0, taper_n))
     thick[-taper_n:] = w + (structure.lip_thickness_mm - w) * tail
 
-    onx, onr = _vertex_normals(outer_x, outer_r, outward=True)
-    cowl_out_x = outer_x + thick * onx
-    cowl_out_r = outer_r + thick * onr
+    # Outward offset round the throat turn is a concave corner and folds, the
+    # mirror image of the cavity folding at the spike shoulder. Same repair.
+    cowl_out_x, cowl_out_r = _offset_and_prune(outer_x, outer_r, thick,
+                                               outward=True, keep_ends=True)
 
     cowl = Profile(
         "cowl",
