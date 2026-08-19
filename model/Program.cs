@@ -32,8 +32,12 @@ namespace AerospikeCE
             // are both a comma.
             CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
 
-            if (args.Length > 0)
-                _specPath = args[0];
+            // --exit-when-done overrides the spec, so a scripted run does not
+            // need its own spec file just to avoid hanging on the viewer.
+            bool bExitFlag = args.Any(a => a == "--exit-when-done");
+            string[] astrPositional = args.Where(a => !a.StartsWith("--")).ToArray();
+            if (astrPositional.Length > 0)
+                _specPath = astrPositional[0];
 
             if (!File.Exists(_specPath))
             {
@@ -44,7 +48,8 @@ namespace AerospikeCE
             try
             {
                 EngineSpec oSpec = EngineSpec.Load(_specPath);
-                Library.Go(oSpec.Geometry.VoxelSizeMm, Task);
+                Library.Go(oSpec.Geometry.VoxelSizeMm, Task,
+                           bEndAppWithTask: bExitFlag || oSpec.Output.ExitWhenDone);
             }
             catch (Exception e)
             {
@@ -81,10 +86,20 @@ namespace AerospikeCE
             // ---- geometry ----
             var oChannelsCowl = new List<ChannelCut>();
             var oChannelsBody = new List<ChannelCut>();
+            var oPortsCowl = new List<PortCut>();
+            var oPortsBody = new List<PortCut>();
             if (oCircuits.TryGetValue("cowl", out var cCowl) && cCowl is not null)
-                oChannelsCowl.Add(CooledFeatures.Cowl(oAsm, cCowl.Channel, oSpec.Cooling.BackWallMm));
+            {
+                var cut = CooledFeatures.Cowl(oAsm, cCowl.Channel, oSpec.Cooling.BackWallMm);
+                oChannelsCowl.Add(cut);
+                oPortsCowl.Add(CooledFeatures.FeedPorts(oAsm, cut));
+            }
             if (oCircuits.TryGetValue("centrebody", out var cBody) && cBody is not null)
-                oChannelsBody.Add(CooledFeatures.Centrebody(oAsm, cBody.Channel, oSpec.Cooling.BackWallMm));
+            {
+                var cut = CooledFeatures.Centrebody(oAsm, cBody.Channel, oSpec.Cooling.BackWallMm);
+                oChannelsBody.Add(cut);
+                oPortsBody.Add(CooledFeatures.FeedPorts(oAsm, cut));
+            }
 
             var oHoles = oInjector is null
                 ? new List<HoleCut>()
@@ -92,12 +107,23 @@ namespace AerospikeCE
 
             WarnIfUnderResolved(oSpec, oChannelsCowl, oChannelsBody);
 
+            // Table the profile distance well below the voxel size, so the
+            // interpolation error stays far under the sampling the kernel is
+            // about to do. Quarter of a voxel is ample and costs a few MB.
+            double fStep = oSpec.Geometry.VoxelSizeMm / 4.0;
+
+            Library.Log("building voxels (this is the slow part)");
             Voxels voxCentrebody = SpikeGeometry.voxBuildCooledPart(
-                new CooledPart(oAsm.CentrebodyProfile(), oChannelsBody));
+                new CooledPart(oAsm.CentrebodyProfile(), oChannelsBody, null, oPortsBody,
+                               1.0f, fStep));
+            Library.Log("  centrebody done");
             Voxels voxCowl = SpikeGeometry.voxBuildCooledPart(
-                new CooledPart(oAsm.CowlProfile(), oChannelsCowl));
+                new CooledPart(oAsm.CowlProfile(), oChannelsCowl, null, oPortsCowl,
+                               1.0f, fStep));
+            Library.Log("  cowl done");
             Voxels voxHead = SpikeGeometry.voxBuildCooledPart(
-                new CooledPart(oAsm.HeadProfile(), null, oHoles));
+                new CooledPart(oAsm.HeadProfile(), null, oHoles, null, 1.0f, fStep));
+            Library.Log("  head done");
 
             Sh.PreviewVoxels(voxCentrebody, Cp.clrRock, 0.9f);
             Sh.PreviewVoxels(voxCowl, Cp.clrBlue, 0.5f);

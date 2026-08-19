@@ -7,3 +7,6 @@ __pycache__/
 *.vdb
 .venv/
 venv/
+
+# Dear ImGui window layout, written by the PicoGK viewer on first run
+imgui.ini

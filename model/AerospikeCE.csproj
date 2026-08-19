@@ -22,4 +22,30 @@
     <Compile Include="../vendor/LEAP71_ShapeKernel/ShapeKernel/**/*.cs" />
   </ItemGroup>
 
+  <!--
+    Copy the PicoGK native runtime next to the binary.
+
+    The runtime ships inside the submodule already; there is nothing to install
+    and no administrator rights involved. But PicoGK.csproj declares those
+    libraries as <None Pack="true">, which packages them for NuGet consumers and
+    does nothing at all for a project reference like ours. Without this the
+    build succeeds, the app starts, and the P/Invoke fails at the first call
+    into the kernel because the loader never sees picogk.
+
+    Copied flat, because that is where the dynamic loader looks first.
+  -->
+  <ItemGroup Condition="'$([MSBuild]::IsOSPlatform(OSX))' == 'true'">
+    <None Include="../vendor/PicoGK/native/osx-arm64/*.dylib">
+      <Link>%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$([MSBuild]::IsOSPlatform(Windows))' == 'true'">
+    <None Include="../vendor/PicoGK/native/win-x64/*.dll">
+      <Link>%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
 </Project>
