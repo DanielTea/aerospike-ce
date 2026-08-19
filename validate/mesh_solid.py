@@ -793,3 +793,64 @@ def expected_port_volume(cut: ChannelCut, port: PortCut) -> float:
     else:
         span = max(port.r_hi - max(port.r_lo, wall - 6.0), 0.0)
     return float(port.count * port.diameter_mm * port.diameter_mm * span)
+
+
+def field_volume(
+    profile: Profile,
+    voxel_mm: float = 0.13,
+    channels: list[ChannelCut] | None = None,
+    holes: list[HoleCut] | None = None,
+    ports: list[PortCut] | None = None,
+    margin_mm: float = 1.0,
+    radial_samples: int = 6000,
+) -> float:
+    """
+    Volume enclosed by the distance field itself, by partial-cell integration.
+
+    This is the reference the mesh should be checked against, and it is better
+    than an analytic estimate because it makes no assumptions. Working out the
+    channel and port volumes by hand means modelling a port as a square bore of
+    some assumed depth and hoping the overlaps cancel; a couple of percent of
+    error creeps in and it is not obvious whether it belongs to the estimate or
+    to the mesh.
+
+    Each cell contributes the fraction of itself that lies inside, taken as a
+    linear ramp across one voxel of the signed distance. That is the same
+    approximation marching cubes makes when it places a vertex, so the two agree
+    to well under the cell size rather than to the cell size.
+    """
+    channels = channels or []
+    holes = holes or []
+    ports = ports or []
+
+    x0 = float(profile.x.min()) - margin_mm
+    x1 = float(profile.x.max()) + margin_mm
+    r_max = float(profile.r.max()) + margin_mm
+
+    nx = max(2, int(math.ceil((x1 - x0) / voxel_mm)) + 1)
+    ny = max(2, int(math.ceil(2.0 * r_max / voxel_mm)) + 1)
+    xs = x0 + np.arange(nx) * voxel_mm
+    ys = -r_max + np.arange(ny) * voxel_mm
+
+    Y, Z = np.meshgrid(ys, ys, indexing="ij")
+    R = np.hypot(Y, Z).astype(np.float32)
+    TH = np.arctan2(Z, Y).astype(np.float32)
+    Yf, Zf = Y.astype(np.float32), Z.astype(np.float32)
+
+    r_grid = np.linspace(0.0, float(R.max()) * 1.001, radial_samples)
+    vx = np.asarray(profile.x, dtype=float)
+    vr = np.asarray(profile.r, dtype=float)
+
+    cell = voxel_mm ** 3
+    total = 0.0
+    for i in range(nx):
+        d = np.interp(R, r_grid, _polygon_sdf_radial(xs[i], r_grid, vx, vr)).astype(np.float32)
+        X = np.full(R.shape, xs[i], dtype=np.float32)
+        for c in channels:
+            d = np.maximum(d, -_channel_sdf(X, R, TH, c))
+        for h in holes:
+            d = np.maximum(d, -_hole_sdf(X, Yf, Zf, h))
+        for pt in ports:
+            d = np.maximum(d, -_port_sdf(X, R, TH, pt))
+        total += float(np.clip(0.5 - d / voxel_mm, 0.0, 1.0).sum())
+    return total * cell
