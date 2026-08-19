@@ -32,6 +32,22 @@ namespace AerospikeCE
         public bool Outward = true;
     }
 
+    /// <summary>
+    /// A ring of radial feed ports, one per cooling channel.
+    ///
+    /// Channels have to be fed. Without a port each is a blind pocket, which is
+    /// unbuildable and also topologically invisible.
+    /// </summary>
+    public sealed class PortCut
+    {
+        public double XAt;
+        public double DiameterMm;
+        public int Count;
+        public double RLo;
+        public double RHi;
+        public double Phase;
+    }
+
     /// <summary>A ring of axial holes, for injector orifices.</summary>
     public sealed class HoleCut
     {
@@ -51,21 +67,73 @@ namespace AerospikeCE
         private readonly double[] _px, _pr;
         private readonly List<ChannelCut> _channels;
         private readonly List<HoleCut> _holes;
+        private readonly List<PortCut> _ports;
         private readonly BBox3 _bounds;
+
+        // Tabulated profile distance over (x, r). See the constructor.
+        private readonly float[,] _table;
+        private readonly double _tx0, _tr0, _tStep;
+        private readonly int _tnx, _tnr;
 
         public CooledPart((double[] x, double[] r) profile,
                           List<ChannelCut>? channels = null,
                           List<HoleCut>? holes = null,
-                          float fMarginMm = 1.0f)
+                          List<PortCut>? ports = null,
+                          float fMarginMm = 1.0f,
+                          double fTableStepMm = 0.05)
         {
             _px = profile.x; _pr = profile.r;
             _channels = channels ?? new List<ChannelCut>();
             _holes = holes ?? new List<HoleCut>();
+            _ports = ports ?? new List<PortCut>();
 
             float x0 = (float)_px.Min() - fMarginMm;
             float x1 = (float)_px.Max() + fMarginMm;
             float rr = (float)_pr.Max() + fMarginMm;
             _bounds = new BBox3(new Vector3(-rr, -rr, x0), new Vector3(rr, rr, x1));
+
+            // The profile is a solid of revolution, so its distance field
+            // depends only on (x, r) and not on angle. Walking all several
+            // hundred profile edges for every voxel the kernel samples costs
+            // twenty-two billion operations on the demonstrator alone, which is
+            // not slow, it is a hang: the viewer opens, nothing is ever drawn,
+            // and the window sits there white.
+            //
+            // Tabulating it once and interpolating turns that into a bilinear
+            // lookup. The step is chosen well below the voxel size, so the
+            // interpolation error is far smaller than the sampling the kernel
+            // is about to do anyway. This mirrors the same optimisation in
+            // mesh_solid.py, which evaluates the profile on a radius grid per
+            // plane for exactly the same reason.
+            _tStep = Math.Max(fTableStepMm, 1e-3);
+            _tx0 = x0;
+            _tr0 = 0.0;
+            _tnx = (int)Math.Ceiling((x1 - x0) / _tStep) + 2;
+            _tnr = (int)Math.Ceiling((rr * Math.Sqrt(2.0)) / _tStep) + 2;
+
+            _table = new float[_tnx, _tnr];
+            Parallel.For(0, _tnx, i =>
+            {
+                double xv = _tx0 + i * _tStep;
+                for (int j = 0; j < _tnr; j++)
+                    _table[i, j] = (float)PolygonDistanceExact(xv, _tr0 + j * _tStep);
+            });
+        }
+
+        /// <summary>Bilinear lookup into the tabulated profile distance.</summary>
+        private double PolygonDistance(double px, double pr)
+        {
+            double fi = (px - _tx0) / _tStep;
+            double fj = (pr - _tr0) / _tStep;
+            int i = (int)Math.Floor(fi), j = (int)Math.Floor(fj);
+            if (i < 0 || j < 0 || i >= _tnx - 1 || j >= _tnr - 1)
+                return PolygonDistanceExact(px, pr);   // outside the table
+
+            double u = fi - i, v = fj - j;
+            return (1 - u) * (1 - v) * _table[i, j]
+                 + u * (1 - v) * _table[i + 1, j]
+                 + (1 - u) * v * _table[i, j + 1]
+                 + u * v * _table[i + 1, j + 1];
         }
 
         public BBox3 oBounds => _bounds;
@@ -77,7 +145,7 @@ namespace AerospikeCE
         /// separate crossing count, because a nearest-edge normal test gets
         /// corners wrong and corners are most of this profile.
         /// </summary>
-        private double PolygonDistance(double px, double pr)
+        private double PolygonDistanceExact(double px, double pr)
         {
             int n = _px.Length;
             double best = double.MaxValue;
@@ -128,6 +196,18 @@ namespace AerospikeCE
             return Math.Max(Math.Max(dRadial, dTheta), dAxial);
         }
 
+        /// <summary>Distance to the nearest radial feed port. Negative inside.</summary>
+        private static double PortDistance(double x, double r, double th, PortCut c)
+        {
+            double pitch = 2.0 * Math.PI / c.Count;
+            double rel = th - c.Phase;
+            double local = rel - pitch * Math.Floor(rel / pitch + 0.5);
+            double dTheta = Math.Abs(local) * Math.Max(r, 1e-6) - 0.5 * c.DiameterMm;
+            double dAxial = Math.Abs(x - c.XAt) - 0.5 * c.DiameterMm;
+            double dRadial = Math.Max(c.RLo - r, r - c.RHi);
+            return Math.Max(Math.Max(dTheta, dAxial), dRadial);
+        }
+
         private static double HoleDistance(double x, double y, double z, HoleCut h)
         {
             double th = Math.Atan2(z, y);
@@ -154,6 +234,7 @@ namespace AerospikeCE
             double d = PolygonDistance(x, r);
             foreach (var c in _channels) d = Math.Max(d, -ChannelDistance(x, r, th, c));
             foreach (var h in _holes) d = Math.Max(d, -HoleDistance(x, y, z, h));
+            foreach (var pt in _ports) d = Math.Max(d, -PortDistance(x, r, th, pt));
             return (float)d;
         }
     }
@@ -229,6 +310,40 @@ namespace AerospikeCE
                 NChannels = ch.NChannels, WidthMm = ch.WidthMm, HeightMm = ch.HeightMm,
                 HotWallMm = ch.HotWallMm, LandMm = ch.LandMm,
                 XStart = x0, XEnd = x1, Outward = false,
+            };
+        }
+
+        /// <summary>
+        /// Radial feed ports at the aft end of a channel ring.
+        ///
+        /// Coolant enters at the throat end, where the flux is worst, and
+        /// leaves at the injector. The cowl draws from an external manifold
+        /// through its outer skin; the centrebody draws from the central bore.
+        /// Sized on flow rather than on the channel cross-section, because a
+        /// port the width of a channel is a sub-millimetre bore no machine will
+        /// hold.
+        /// </summary>
+        public static PortCut FeedPorts(EngineAssembly a, ChannelCut cut,
+                                        double insetMm = 1.5)
+        {
+            double d = Math.Max(1.2, 1.5 * cut.HeightMm);
+            double xAt = cut.XEnd - insetMm;
+            double wall = EngineAssembly.Interp(cut.WallX, cut.WallR, xAt);
+            double rLo, rHi;
+            if (cut.Outward)
+            {
+                rLo = wall + cut.HotWallMm;
+                rHi = a.CowlOuterR.Max() + 5.0;
+            }
+            else
+            {
+                rLo = 0.0;
+                rHi = wall - cut.HotWallMm;
+            }
+            return new PortCut
+            {
+                XAt = xAt, DiameterMm = d, Count = cut.NChannels,
+                RLo = rLo, RHi = rHi, Phase = 0.0,
             };
         }
 
