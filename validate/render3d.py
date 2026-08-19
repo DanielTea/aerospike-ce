@@ -27,6 +27,7 @@ from matplotlib.colors import to_rgb  # noqa: E402
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection  # noqa: E402
 
 from engine_design import design_engine  # noqa: E402
+from manifold_ref import design_manifolds, geometry_features  # noqa: E402
 from mesh_solid import (  # noqa: E402
     build_mesh_streaming,
     centrebody_channels,
@@ -37,6 +38,17 @@ from mesh_solid import (  # noqa: E402
 )
 
 COLOUR = {"centrebody": "#6f9ec9", "cowl": "#c8803f", "head": "#9a9a9a"}
+
+
+_FEATURE_CACHE: dict = {}
+
+
+def _features(design):
+    """Manifold and mount geometry, computed once per design."""
+    key = id(design)
+    if key not in _FEATURE_CACHE:
+        _FEATURE_CACHE[key] = geometry_features(design, design_manifolds(design))
+    return _FEATURE_CACHE[key]
 
 
 def build_parts(design, voxel_mm: float, sweep_deg: float, target_tris: int,
@@ -55,11 +67,17 @@ def build_parts(design, voxel_mm: float, sweep_deg: float, target_tris: int,
         if part == "head" and design.injector is not None:
             hl = injector_holes(a, design.injector)
 
+        # manifolds, their boss rings and the mounting lugs
+        gf = _features(design).get(part, {})
+        hl = list(hl) + list(gf.get("holes", []))
+
         t0 = time.time()
         try:
             v, f = build_mesh_streaming(
                 a.profiles[part], voxel_mm=voxel_mm,
                 channels=ch, ports=pt, holes=hl,
+                bosses=gf.get("bosses"), lugs=gf.get("lugs"),
+                plenums=gf.get("plenums"),
                 cut_sector=None if keep_sector else sector,
                 keep_sector=keep_sector, x_window=x_window)
         except ValueError:
