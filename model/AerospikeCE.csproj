@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>AerospikeCE</RootNamespace>
+    <AssemblyName>AerospikeCE</AssemblyName>
+  </PropertyGroup>
+
+  <!--
+    PicoGK is a real project reference, cloned into vendor/ (see README).
+    ShapeKernel ships as source with no csproj, so it is compiled in directly.
+    The Examples folder is deliberately excluded: it defines its own entry points.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="../vendor/PicoGK/PicoGK.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../vendor/LEAP71_ShapeKernel/ShapeKernel/**/*.cs" />
+  </ItemGroup>
+
+</Project>
