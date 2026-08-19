@@ -25,7 +25,7 @@
     "wall_thickness_mm": 3.0,
     "lip_thickness_mm": 1.0,
     "base_cap_thickness_mm": 4.0,
-    "head_thickness_mm": 6.0,
+    "head_thickness_mm": 36.0,
     "flange_width_mm": 22.0
   },
 

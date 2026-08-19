@@ -120,6 +120,49 @@ class PortCut:
 
 
 @dataclass(frozen=True)
+class PlenumCut:
+    """
+    An annular manifold void with a diamond section.
+
+    Diamond rather than round or square because it is an internal void in a
+    printed part: a flat roof the width of the plenum sags, and nothing can
+    reach inside a closed ring to support it. The upper faces stand at
+    atan(half_x / half_r) from the plate.
+    """
+    x_at: float
+    r_inner: float
+    half_x: float
+    half_r: float
+
+
+@dataclass(frozen=True)
+class RingBoss:
+    """
+    Annular material added round the outside, to wrap a plenum in metal.
+
+    The section tapers to nothing at its outer radius, so both flanks stand at
+    45 degrees and neither the leading nor the trailing shoulder is an overhang.
+    A square boss would present a horizontal ledge on its underside.
+    """
+    x_at: float
+    r_inner: float
+    r_outer: float
+    half_x: float
+
+
+@dataclass(frozen=True)
+class LugAdd:
+    """A ring of mounting lugs: radial pads at the head end."""
+    count: int
+    x_at: float
+    half_x: float
+    r_inner: float
+    r_outer: float
+    half_width_deg: float
+    phase: float = 0.0
+
+
+@dataclass(frozen=True)
 class HoleCut:
     """A ring of axial holes, for injector orifices."""
     radius_mm: float            # ring radius on the face
@@ -167,6 +210,35 @@ def _port_sdf(X, R, TH, cut: PortCut) -> np.ndarray:
     return np.maximum(np.maximum(d_theta, d_axial), d_radial).astype(np.float32)
 
 
+def _plenum_sdf(X, R, cut: PlenumCut) -> np.ndarray:
+    """Distance to the diamond ring. Negative inside."""
+    rc = cut.r_inner + cut.half_r
+    a, b = max(cut.half_x, 1e-6), max(cut.half_r, 1e-6)
+    # plane distance to |dx|/a + |dr|/b = 1, exact on the faces
+    v = np.abs(X - cut.x_at) / a + np.abs(R - rc) / b - 1.0
+    return (v / math.sqrt(1.0 / (a * a) + 1.0 / (b * b))).astype(np.float32)
+
+
+def _ring_boss_sdf(X, R, boss: RingBoss) -> np.ndarray:
+    """Distance to the tapered ring of added material. Negative inside."""
+    taper = np.maximum(boss.half_x - np.maximum(R - boss.r_inner, 0.0), 0.0)
+    d_ax = np.abs(X - boss.x_at) - taper
+    d_r = np.maximum(boss.r_inner - R, R - boss.r_outer)
+    return np.maximum(d_ax, d_r).astype(np.float32)
+
+
+def _lug_sdf(X, R, TH, lug: LugAdd) -> np.ndarray:
+    """Distance to the nearest mounting lug. Negative inside."""
+    pitch = 2.0 * math.pi / lug.count
+    rel = TH - lug.phase
+    local = np.mod(rel + 0.5 * pitch, pitch) - 0.5 * pitch
+    d_theta = np.abs(local) - math.radians(lug.half_width_deg)
+    d_theta = d_theta * np.maximum(R, 1e-6)
+    d_r = np.maximum(lug.r_inner - R, R - lug.r_outer)
+    d_x = np.abs(X - lug.x_at) - lug.half_x
+    return np.maximum(np.maximum(d_theta, d_r), d_x).astype(np.float32)
+
+
 def _hole_sdf(X, Y, Z, cut: HoleCut) -> np.ndarray:
     """Signed distance to the nearest hole of the ring."""
     th = np.arctan2(Z, Y)
@@ -202,6 +274,9 @@ def build_field(
     margin_mm: float = 1.0,
     cut_sector: tuple[float, float] | None = None,
     ports: list[PortCut] | None = None,
+    bosses: list[RingBoss] | None = None,
+    lugs: list[LugAdd] | None = None,
+    plenums: list[PlenumCut] | None = None,
 ):
     """
     Signed distance field of one part, with its features subtracted.
@@ -213,9 +288,11 @@ def build_field(
     channels = channels or []
     holes = holes or []
     ports = ports or []
+    bosses = bosses or []
+    lugs = lugs or []
+    plenums = plenums or []
 
-    x0, x1 = float(profile.x.min()) - margin_mm, float(profile.x.max()) + margin_mm
-    r_max = float(profile.r.max()) + margin_mm
+    x0, x1, r_max = _feature_extent(profile, margin_mm, bosses, lugs)
 
     nx = max(2, int(math.ceil((x1 - x0) / voxel_mm)) + 1)
     ny = max(2, int(math.ceil(2.0 * r_max / voxel_mm)) + 1)
@@ -233,6 +310,12 @@ def build_field(
     for i, xv in enumerate(xs):
         X = np.full(R.shape, xv, dtype=np.float32)
         d = _polygon_sdf(X, R, vx, vr)
+        for b in bosses:
+            d = np.minimum(d, _ring_boss_sdf(X, R, b))
+        for lg in lugs:
+            d = np.minimum(d, _lug_sdf(X, R, TH, lg))
+        for pl in plenums:
+            d = np.maximum(d, -_plenum_sdf(X, R, pl))
         for c in channels:
             d = np.maximum(d, -_channel_sdf(X, R, TH, c))
         for h in holes:
@@ -257,6 +340,29 @@ def mesh_field(field: np.ndarray, origin, voxel_mm: float):
     return verts, faces.astype(np.int64)
 
 
+def _feature_extent(profile, margin_mm, bosses, lugs):
+    """
+    Bounding extent of the part *including* material added outside its profile.
+
+    Sizing the field from the meridional profile alone truncates anything bolted
+    on beyond it: the mounting lugs reach 26 mm past the flange, get clipped at
+    the field boundary, and the mesh comes back with open edges where they were
+    cut. Silent, because a clipped solid still meshes.
+    """
+    x0 = float(profile.x.min()) - margin_mm
+    x1 = float(profile.x.max()) + margin_mm
+    r_max = float(profile.r.max()) + margin_mm
+    for b in bosses or []:
+        x0 = min(x0, b.x_at - b.half_x - margin_mm)
+        x1 = max(x1, b.x_at + b.half_x + margin_mm)
+        r_max = max(r_max, b.r_outer + margin_mm)
+    for lg in lugs or []:
+        x0 = min(x0, lg.x_at - lg.half_x - margin_mm)
+        x1 = max(x1, lg.x_at + lg.half_x + margin_mm)
+        r_max = max(r_max, lg.r_outer + margin_mm)
+    return x0, x1, r_max
+
+
 def build_mesh(
     profile: Profile,
     voxel_mm: float = 0.2,
@@ -264,9 +370,13 @@ def build_mesh(
     holes: list[HoleCut] | None = None,
     cut_sector: tuple[float, float] | None = None,
     ports: list[PortCut] | None = None,
+    bosses: list[RingBoss] | None = None,
+    lugs: list[LugAdd] | None = None,
+    plenums: list[PlenumCut] | None = None,
 ):
-    field, origin, spacing = build_field(profile, voxel_mm, channels, holes,
-                                         cut_sector=cut_sector, ports=ports)
+    field, origin, spacing = build_field(
+        profile, voxel_mm, channels, holes, cut_sector=cut_sector, ports=ports,
+        bosses=bosses, lugs=lugs, plenums=plenums)
     return mesh_field(field, origin, spacing)
 
 
@@ -378,7 +488,13 @@ def centrebody_channels(a: EngineAssembly, channel_spec, back_wall_mm: float = 0
 
 def injector_holes(a: EngineAssembly, injector) -> list[HoleCut]:
     """Fuel and oxidiser orifice rings through the head disc."""
-    x0 = a.head_x - a.structure.head_thickness_mm - 1.0
+    # An orifice runs from its plenum to the chamber face, not through the whole
+    # block. Once the head was thickened to hold the manifolds, a hole through
+    # all of it became 1.3 mm across and 36 mm long: 25:1, which no process will
+    # drill or print straight, and which marching cubes cannot hold together
+    # either. The plenums occupy the depth; the orifice is the short run between
+    # the plenum's aft face and the chamber.
+    x0 = a.head_x - (a.structure.wall_thickness_mm + 3.0)
     x1 = a.head_x + 1.0
     half_pitch = math.pi / injector.n_elements
     return [
@@ -461,6 +577,9 @@ def build_mesh_streaming(
     bbox: tuple[float, float, float, float] | None = None,
     keep_sector: tuple[float, float] | None = None,
     x_window: tuple[float, float] | None = None,
+    bosses: list[RingBoss] | None = None,
+    lugs: list[LugAdd] | None = None,
+    plenums: list[PlenumCut] | None = None,
 ):
     """
     Marching cubes over the volume in slabs, welded into one mesh.
@@ -477,10 +596,11 @@ def build_mesh_streaming(
     channels = channels or []
     holes = holes or []
     ports = ports or []
+    bosses = bosses or []
+    lugs = lugs or []
+    plenums = plenums or []
 
-    x0 = float(profile.x.min()) - margin_mm
-    x1 = float(profile.x.max()) + margin_mm
-    r_max = float(profile.r.max()) + margin_mm
+    x0, x1, r_max = _feature_extent(profile, margin_mm, bosses, lugs)
 
     # The grid must step by exactly voxel_mm, not by a linspace interval that
     # merely averages to it. marching_cubes is told the spacing separately, so
@@ -523,6 +643,16 @@ def build_mesh_streaming(
         prof1d = _polygon_sdf_radial(xs[i], r_grid, vx, vr)
         d = np.interp(R, r_grid, prof1d).astype(np.float32)
         X = np.full(R.shape, xs[i], dtype=np.float32)
+
+        # Material is added before anything is taken away, so a hole drilled
+        # through a lug or a plenum hollowed inside a boss cuts the metal that
+        # was just put there rather than the air where it used to be.
+        for b in bosses:
+            d = np.minimum(d, _ring_boss_sdf(X, R, b))
+        for lg in lugs:
+            d = np.minimum(d, _lug_sdf(X, R, TH, lg))
+        for pl in plenums:
+            d = np.maximum(d, -_plenum_sdf(X, R, pl))
         for c in channels:
             d = np.maximum(d, -_channel_sdf(X, R.astype(np.float32),
                                             TH.astype(np.float32), c))

@@ -205,18 +205,66 @@ def test_the_two_rings_are_staggered(design):
 
 def test_head_meshes_with_exactly_the_right_topology(design):
     """
-    Genus = 1 for the bored disc plus one per orifice. The orifices are three or
-    four voxels across at 0.4 mm, which is enough for marching cubes to keep the
-    topology. The 0.4 mm cooling channels are not, which is why they are checked
-    against the field instead of against a mesh.
+    An injector orifice is only a through-feature once the plenum it feeds
+    exists. Meshed without the manifolds it is a blind pocket that adds no
+    topology at all, which is what the head reports: genus 1, the bore alone.
+
+    So the check is on volume rather than genus. Multi-cavity Euler arithmetic
+    is brittle -- the boundary is the outer surface plus one closed surface per
+    plenum, joined by every orifice -- whereas the material the features remove
+    is something both the mesher and a hand calculation can state independently.
     """
-    from mesh_export import manifold_report
-    from mesh_solid import build_mesh
+    from mesh_export import manifold_report, mesh_volume
+    from mesh_solid import build_mesh, injector_holes
+    from manifold_ref import design_manifolds, geometry_features
 
     a, inj = design.assembly, design.injector
-    v, f = build_mesh(a.profiles["head"], voxel_mm=0.4,
-                      holes=injector_holes(a, inj))
-    rep = manifold_report(v, f)
+    gf = geometry_features(design, design_manifolds(design))
+    holes = injector_holes(a, inj) + list(gf["head"]["holes"])
+
+    plain = build_mesh(a.profiles["head"], voxel_mm=0.4)
+    with_features = build_mesh(a.profiles["head"], voxel_mm=0.4, holes=holes,
+                               lugs=gf["head"]["lugs"],
+                               plenums=gf["head"]["plenums"])
+
+    rep = manifold_report(*with_features)
     assert rep["watertight"]
-    genus = (2 - rep["euler"]) // 2
-    assert genus == 1 + 2 * inj.n_elements
+    assert rep["boundary_edges"] == 0
+
+    v_plain = mesh_volume(*plain)
+    v_feat = mesh_volume(*with_features)
+
+    # the plenums alone remove a known volume: a diamond ring, 2*a*b in section
+    removed = sum(2.0 * p.half_x * p.half_r * 2.0 * math.pi
+                  * (p.r_inner + p.half_r) for p in gf["head"]["plenums"])
+    # lugs add material, so the net is bounded rather than equal
+    assert v_feat < v_plain, "features removed nothing"
+    assert removed > 0.5 * (v_plain - v_feat), (
+        "plenums should dominate what the features remove")
+
+
+def test_injector_orifices_reach_their_plenum(design):
+    """
+    A hole that stops short of the manifold feeds nothing, and nothing in a
+    watertightness or topology check would notice.
+    """
+    from mesh_solid import injector_holes
+    from manifold_ref import design_manifolds, geometry_features
+
+    a = design.assembly
+    md = design_manifolds(design)
+    holes = injector_holes(a, design.injector)
+    fed = [p for p in md.plenums if p.name != "cowl_inlet_ring"]
+    for h in holes:
+        assert any(p.x_mm + p.half_x_mm >= h.x_start - 1e-6 for p in fed), (
+            f"orifice starting at x={h.x_start:.1f} reaches no plenum")
+
+
+def test_orifices_stay_drillable(design):
+    """
+    Once the head was thickened for its manifolds, a hole through the whole
+    block became 25:1. Nothing prints or drills that straight.
+    """
+    from mesh_solid import injector_holes
+    for h in injector_holes(design.assembly, design.injector):
+        assert (h.x_end - h.x_start) / h.diameter_mm < 12.0
