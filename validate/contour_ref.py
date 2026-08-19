@@ -102,10 +102,40 @@ class PlugContour:
     exit_radius: float          # mm
     throat_area: float          # mm^2
     length: float               # mm, throat station to spike tip
+    lip_x: float                # mm, axial station of the cowl lip
 
     @property
     def truncation_index(self) -> int:
         return len(self.x)
+
+    # ----------------------------------------------------------------------
+    # The throat is NOT a radial annulus. It is the sonic line running from the
+    # cowl lip at (lip_x, exit_radius) to the first contour point at (0, r[0]),
+    # inclined at nu_e from the radial direction. Measuring it radially instead
+    # understates the area by a factor of about 2.5 at eps = 8, which is enough
+    # to put the real choke point in the wrong place.
+    # ----------------------------------------------------------------------
+
+    @property
+    def throat_slant_length(self) -> float:
+        """Length of the sonic line from the lip to the spike, in mm."""
+        return math.hypot(self.lip_x - self.x[0], self.exit_radius - self.r[0])
+
+    @property
+    def throat_area_from_geometry(self) -> float:
+        """
+        Annular throat area swept by the sonic line, pi*(r_e + r_0)*l.
+
+        Must agree with `throat_area` (= pi*r_e^2/eps) to machine precision.
+        That agreement is what proves `lip_x` is placed correctly, and it is the
+        second load-bearing self-check in this file after spike closure.
+        """
+        return math.pi * (self.exit_radius + self.r[0]) * self.throat_slant_length
+
+    @property
+    def throat_inclination(self) -> float:
+        """Angle of the sonic line from the axis, in radians. Equals pi/2 - nu_e."""
+        return math.atan2(self.exit_radius - self.r[0], self.lip_x - self.x[0])
 
 
 def build_contour(
@@ -151,9 +181,12 @@ def build_contour(
         rs.append(exit_radius_mm * (1.0 - xi * sin_a))
         ms.append(mach)
 
-    # shift so the throat station sits at x = 0
+    # Shift so the first contour point sits at x = 0. The Prandtl-Meyer fan is
+    # centred on the cowl lip, which was the origin before the shift, so the lip
+    # lands at -x0 -- downstream of the spike shoulder, not level with it.
     x0 = xs[0]
     xs = [x - x0 for x in xs]
+    lip_x = -x0
 
     full_length = xs[-1]
     if truncate_fraction < 1.0:
@@ -171,6 +204,7 @@ def build_contour(
         exit_radius=exit_radius_mm,
         throat_area=throat_area,
         length=xs[-1],
+        lip_x=lip_x,
     )
 
 

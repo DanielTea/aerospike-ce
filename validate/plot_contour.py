@@ -51,10 +51,14 @@ def main() -> None:
     ax1.plot(c.x, [-r for r in c.r], color="#1f4e79", lw=2)
     ax1.axhline(c.exit_radius, color="#999", ls=":", lw=1)
     ax1.axhline(-c.exit_radius, color="#999", ls=":", lw=1)
-    ax1.plot([0], [c.exit_radius], "o", color="#c00", ms=7, label="cowl lip")
-    ax1.plot([0], [-c.exit_radius], "o", color="#c00", ms=7)
-    ax1.plot([c.x[0], 0], [c.r[0], c.exit_radius], color="#c00", lw=1.5, label="throat plane")
-    ax1.plot([c.x[0], 0], [-c.r[0], -c.exit_radius], color="#c00", lw=1.5)
+    # The lip sits at c.lip_x, not at x = 0. Drawing it at the origin makes the
+    # throat look like a radial annulus; it is inclined at nu_e, and the area
+    # difference between the two readings is a factor of about 2.5.
+    ax1.plot([c.lip_x], [c.exit_radius], "o", color="#c00", ms=7, label="cowl lip")
+    ax1.plot([c.lip_x], [-c.exit_radius], "o", color="#c00", ms=7)
+    ax1.plot([c.x[0], c.lip_x], [c.r[0], c.exit_radius], color="#c00", lw=1.5,
+             label="throat (sonic line)")
+    ax1.plot([c.x[0], c.lip_x], [-c.r[0], -c.exit_radius], color="#c00", lw=1.5)
     ax1.axhline(0, color="#bbb", lw=0.8, ls="--")
     ax1.set_aspect("equal")
     ax1.set_xlabel("x [mm]")
@@ -81,6 +85,9 @@ def main() -> None:
     print(f"spike length       {c.length:.3f} mm")
     print(f"tip radius         {c.r[-1]:.4f} mm")
     print(f"throat area        {c.throat_area:.3f} mm2")
+    print(f"lip station        x={c.lip_x:.4f} mm")
+    print(f"throat slant       {c.throat_slant_length:.4f} mm")
+    print(f"throat area (geom) {c.throat_area_from_geometry:.3f} mm2")
     print(f"wrote {out_png}")
 
 

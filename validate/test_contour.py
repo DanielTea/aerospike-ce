@@ -89,6 +89,60 @@ def test_throat_plane_is_inclined(contour):
     assert 30.0 < math.degrees(contour.throat_angle) < 80.0
 
 
+# --------------------------------------------------------------------------
+# throat closure: the lip station and the inclined sonic line
+#
+# These are the counterpart to test_spike_closes_on_the_axis. That one pins the
+# downstream end of the contour; these pin the upstream end. Together they mean
+# a wrong lip position cannot survive the suite.
+# --------------------------------------------------------------------------
+
+def test_lip_sits_downstream_of_the_spike_shoulder(contour):
+    """
+    The Prandtl-Meyer fan is centred on the lip, and the first contour point is
+    upstream of it. After the shift that puts the shoulder at x = 0, the lip
+    must land at positive x. Drawing it at x = 0 makes the throat look radial.
+    """
+    assert contour.lip_x > 0.0
+    assert contour.lip_x < contour.exit_radius
+
+
+def test_throat_area_closes_on_the_geometry(contour):
+    """
+    pi*(r_e + r_0)*l computed from the placed lip must reproduce pi*r_e^2/eps.
+    This is an identity, not an approximation, so the tolerance is tight enough
+    to catch a lip misplaced by a micron.
+    """
+    assert contour.throat_area_from_geometry == pytest.approx(contour.throat_area, rel=1e-12)
+
+
+def test_throat_line_is_normal_to_the_throat_plane(contour):
+    """The sonic line sits at pi/2 - nu_e from the axis. Exact by construction."""
+    assert contour.throat_inclination + contour.throat_angle == pytest.approx(
+        math.pi / 2.0, abs=1e-12
+    )
+
+
+def test_radial_annulus_would_understate_the_throat(contour):
+    """
+    Guard against the tempting mistake. Measuring the throat as a radial annulus
+    at the lip station gives a much smaller number, which would place the choke
+    point upstream of the design throat.
+    """
+    radial = math.pi * (contour.exit_radius ** 2 - contour.r[0] ** 2)
+    assert radial < 0.5 * contour.throat_area
+
+
+def test_lip_position_is_independent_of_truncation():
+    """Truncation chops the tail. It must not move the throat."""
+    full = build_contour(8.0, 30.0, GAMMA, n_points=400)
+    trunc = build_contour(8.0, 30.0, GAMMA, n_points=400, truncate_fraction=0.30)
+    assert trunc.lip_x == pytest.approx(full.lip_x, rel=1e-12)
+    assert trunc.throat_area_from_geometry == pytest.approx(
+        full.throat_area_from_geometry, rel=1e-12
+    )
+
+
 def test_length_scales_with_exit_radius():
     a = build_contour(8.0, 30.0, GAMMA)
     b = build_contour(8.0, 60.0, GAMMA)

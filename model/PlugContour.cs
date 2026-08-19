@@ -24,17 +24,42 @@ namespace AerospikeCE
         public double ThroatAngleRad { get; }   // nu_e, inclination of throat plane
         public double ExitRadiusMm { get; }
         public double ThroatAreaMm2 { get; }
+        public double LipXMm { get; }           // axial station of the cowl lip
         public double LengthMm => X[^1];
         public double TipRadiusMm => R[^1];
 
+        // The throat is NOT a radial annulus. It is the sonic line from the lip
+        // at (LipXMm, ExitRadiusMm) to the first contour point at (0, R[0]),
+        // inclined at nu_e from the radial direction. Reading it radially
+        // understates the area by a factor of about 2.5 at eps = 8.
+
+        /// <summary>Length of the sonic line from the lip to the spike, mm.</summary>
+        public double ThroatSlantLengthMm =>
+            Math.Sqrt((LipXMm - X[0]) * (LipXMm - X[0]) +
+                      (ExitRadiusMm - R[0]) * (ExitRadiusMm - R[0]));
+
+        /// <summary>
+        /// Throat area swept by the sonic line, pi*(r_e + r_0)*l. Must agree
+        /// with ThroatAreaMm2 to machine precision; that agreement is what
+        /// proves LipXMm is placed correctly.
+        /// </summary>
+        public double ThroatAreaFromGeometryMm2 =>
+            Math.PI * (ExitRadiusMm + R[0]) * ThroatSlantLengthMm;
+
+        /// <summary>Sonic line angle from the axis, rad. Equals pi/2 - nu_e.</summary>
+        public double ThroatInclinationRad =>
+            Math.Atan2(ExitRadiusMm - R[0], LipXMm - X[0]);
+
         private PlugContour(double[] x, double[] r, double[] mach,
-                            double exitMach, double nuE, double exitRadius, double throatArea)
+                            double exitMach, double nuE, double exitRadius, double throatArea,
+                            double lipX)
         {
             X = x; R = r; Mach = mach;
             ExitMach = exitMach;
             ThroatAngleRad = nuE;
             ExitRadiusMm = exitRadius;
             ThroatAreaMm2 = throatArea;
+            LipXMm = lipX;
         }
 
         public static PlugContour Build(
@@ -75,9 +100,12 @@ namespace AerospikeCE
                 ms.Add(mach);
             }
 
-            // shift so the throat station sits at x = 0
+            // Shift so the first contour point sits at x = 0. The Prandtl-Meyer
+            // fan is centred on the cowl lip, which was the origin before the
+            // shift, so the lip lands at -x0 -- downstream of the shoulder.
             double x0 = xs[0];
             for (int i = 0; i < xs.Count; i++) xs[i] -= x0;
+            double lipX = -x0;
 
             if (truncateFraction < 1.0)
             {
@@ -92,7 +120,7 @@ namespace AerospikeCE
             double throatArea = Math.PI * exitRadiusMm * exitRadiusMm / expansionRatio;
 
             return new PlugContour(xs.ToArray(), rs.ToArray(), ms.ToArray(),
-                                   exitMach, nuE, exitRadiusMm, throatArea);
+                                   exitMach, nuE, exitRadiusMm, throatArea, lipX);
         }
 
         /// <summary>
@@ -119,12 +147,20 @@ namespace AerospikeCE
             return R[lo] + f * (R[hi] - R[lo]);
         }
 
+        /// <summary>
+        /// Write the contour as CSV.
+        ///
+        /// Invariant culture explicitly, not inherited from the thread: under a
+        /// locale with a comma decimal separator this file would otherwise use
+        /// a comma for both the decimal point and the field delimiter.
+        /// </summary>
         public void WriteCsv(string path)
         {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
             using var w = new StreamWriter(path);
             w.WriteLine("x_mm,r_mm,mach");
             for (int i = 0; i < X.Length; i++)
-                w.WriteLine($"{X[i]:F6},{R[i]:F6},{Mach[i]:F6}");
+                w.WriteLine(string.Format(inv, "{0:F6},{1:F6},{2:F6}", X[i], R[i], Mach[i]));
         }
     }
 }
