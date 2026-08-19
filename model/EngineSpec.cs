@@ -69,6 +69,7 @@ namespace AerospikeCE
     {
         [JsonPropertyName("materials")]                  public string[] Materials { get; set; } = { "grcop42", "inconel718" };
         [JsonPropertyName("min_channel_width_mm")]       public double MinChannelWidthMm { get; set; } = 0.4;
+        [JsonPropertyName("min_hot_wall_mm")]            public double MinHotWallMm { get; set; } = 0.3;
         [JsonPropertyName("max_pressure_drop_fraction")] public double MaxPressureDropFraction { get; set; } = 0.5;
         [JsonPropertyName("back_wall_mm")]               public double BackWallMm { get; set; } = 0.5;
     }
@@ -78,6 +79,31 @@ namespace AerospikeCE
         [JsonPropertyName("stiffness")]             public double Stiffness { get; set; } = 0.20;
         [JsonPropertyName("discharge_coefficient")] public double DischargeCoefficient { get; set; } = 0.75;
         [JsonPropertyName("min_land_mm")]           public double MinLandMm { get; set; } = 0.8;
+    }
+
+    public sealed class FilmSpecJson
+    {
+        [JsonPropertyName("fuel_fraction")]          public double FuelFraction { get; set; } = 0.0;
+        [JsonPropertyName("slot_height_mm")]         public double SlotHeightMm { get; set; } = 0.3;
+        [JsonPropertyName("combustion_efficiency")]  public double CombustionEfficiency { get; set; } = 0.5;
+    }
+
+    public sealed class CoatingSpecJson
+    {
+        [JsonPropertyName("thickness_mm")]        public double ThicknessMm { get; set; } = 0.0;
+        [JsonPropertyName("conductivity")]        public double Conductivity { get; set; } = 1.0;
+        [JsonPropertyName("max_surface_temp_k")]  public double MaxSurfaceTempK { get; set; } = 1600.0;
+    }
+
+    public sealed class StartupSpec
+    {
+        [JsonPropertyName("ramp_time_s")]     public double RampTimeS { get; set; } = 0.30;
+        [JsonPropertyName("coolant_lead_s")]  public double CoolantLeadS { get; set; } = 0.20;
+    }
+
+    public sealed class StructureSpecJson
+    {
+        [JsonPropertyName("required_cycles")] public double RequiredCycles { get; set; } = 100.0;
     }
 
     public sealed class OutputSpec
@@ -99,6 +125,10 @@ namespace AerospikeCE
         [JsonPropertyName("operation")]  public OperationSpec Operation { get; set; } = new();
         [JsonPropertyName("cooling")]    public CoolingSpec Cooling { get; set; } = new();
         [JsonPropertyName("injector")]   public InjectorSpec Injector { get; set; } = new();
+        [JsonPropertyName("film")]       public FilmSpecJson Film { get; set; } = new();
+        [JsonPropertyName("coating")]    public CoatingSpecJson Coating { get; set; } = new();
+        [JsonPropertyName("startup")]    public StartupSpec Startup { get; set; } = new();
+        [JsonPropertyName("structure")]  public StructureSpecJson Structure { get; set; } = new();
         [JsonPropertyName("output")]   public OutputSpec Output { get; set; } = new();
 
         public static EngineSpec Load(string path)

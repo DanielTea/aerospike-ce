@@ -202,6 +202,8 @@ def build_chamber(
     ambient_pressure_pa: float = 101325.0,
     c_star_efficiency: float = 0.94,
     truncation_efficiency: float = 0.99,
+    film_fraction: float = 0.0,
+    film_combustion_efficiency: float = 0.5,
 ) -> ChamberConditions:
     """
     Chamber conditions and delivered performance.
@@ -214,6 +216,14 @@ def build_chamber(
     percent spike gives up on the order of 1 percent, which is the entire reason
     nobody flies a full-length one. Also an input; the base flow that sets it is
     not modelled here.
+
+    film_fraction is fuel diverted to cool the wall rather than to burn at the
+    design mixture ratio. It is not free: the film runs along the wall fuel-rich
+    and only partly reacts, so it carries mass through the nozzle without having
+    contributed its full share of energy. Charging it at
+    `film_combustion_efficiency` -- half, by default, which is the usual band for
+    a wall film -- is crude, and it is far better than pretending a tenth of the
+    fuel can be spent on cooling for nothing.
     """
     if chamber_pressure_bar <= 0.0:
         raise ValueError("chamber pressure must be positive")
@@ -226,7 +236,13 @@ def build_chamber(
     at = throat_area_mm2 * 1e-6
     gamma = propellant.gamma
 
-    c_star = c_star_ideal(propellant, mixture_ratio) * c_star_efficiency
+    if not 0.0 <= film_fraction < 1.0:
+        raise ValueError("film_fraction must be in [0, 1)")
+
+    # fuel spent on the film is charged at a reduced combustion efficiency
+    film_penalty = 1.0 - film_fraction * (1.0 - film_combustion_efficiency) \
+        / (1.0 + mixture_ratio)
+    c_star = c_star_ideal(propellant, mixture_ratio) * c_star_efficiency * film_penalty
     if c_star <= 0.0:
         raise ValueError("mixture ratio is far enough off peak that c* collapses")
 
@@ -305,4 +321,7 @@ def chamber_from_spec(spec: dict, throat_area_mm2: float,
         ambient_pressure_pa=o.get("ambient_pressure_pa", 101325.0),
         c_star_efficiency=o.get("c_star_efficiency", 0.94),
         truncation_efficiency=o.get("truncation_efficiency", 0.99),
+        film_fraction=spec.get("film", {}).get("fuel_fraction", 0.0),
+        film_combustion_efficiency=spec.get("film", {}).get(
+            "combustion_efficiency", 0.5),
     )

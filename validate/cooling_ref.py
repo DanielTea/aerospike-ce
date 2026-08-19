@@ -55,18 +55,48 @@ from combustion_ref import R_UNIVERSAL, ChamberConditions
 
 @dataclass(frozen=True)
 class Material:
+    """
+    Thermal and mechanical properties.
+
+    Yield and modulus are quoted at room temperature and derated linearly to
+    zero at the melting point, which is crude but captures the effect that
+    matters: a hot wall is much weaker than a cold one, and the hot wall is
+    exactly where the stress is.
+
+    Ductility and the fatigue exponent feed a Coffin-Manson life estimate.
+    Regeneratively cooled chambers do not fail by bursting; they fail by
+    thermal-strain ratchetting over tens to hundreds of cycles, and the
+    canonical failure is the hot wall bulging into the channel and thinning
+    until it splits.
+    """
     name: str
     conductivity: float         # W/(m K)
     max_wall_temp: float        # K, sustained
     density: float              # kg/m^3
+    youngs_modulus: float = 120e9       # Pa at 293 K
+    poisson: float = 0.33
+    yield_strength: float = 300e6       # Pa at 293 K
+    expansion: float = 17e-6            # 1/K
+    melting_point: float = 1600.0       # K
+    fatigue_ductility: float = 0.35     # Coffin-Manson eps_f'
+    fatigue_exponent: float = -0.6      # Coffin-Manson c
 
 
 MATERIALS: dict[str, Material] = {
     # printed nickel superalloy, the usual choice for a small regen chamber
-    "inconel718": Material("inconel718", 25.0, 1150.0, 8190.0),
-    # printed copper alloy: far better conductor, much lower temperature limit
-    "cucrzr": Material("cucrzr", 320.0, 800.0, 8890.0),
-    "grcop42": Material("grcop42", 290.0, 1000.0, 8756.0),
+    "inconel718": Material("inconel718", 25.0, 1150.0, 8190.0,
+                           youngs_modulus=200e9, poisson=0.29,
+                           yield_strength=1030e6, expansion=13e-6,
+                           melting_point=1610.0, fatigue_ductility=0.25),
+    # printed copper alloys: far better conductors, much lower temperature limit
+    "cucrzr": Material("cucrzr", 320.0, 800.0, 8890.0,
+                       youngs_modulus=128e9, poisson=0.34,
+                       yield_strength=280e6, expansion=17e-6,
+                       melting_point=1350.0, fatigue_ductility=0.40),
+    "grcop42": Material("grcop42", 290.0, 1000.0, 8756.0,
+                        youngs_modulus=110e9, poisson=0.34,
+                        yield_strength=190e6, expansion=17.5e-6,
+                        melting_point=1350.0, fatigue_ductility=0.45),
 }
 
 
@@ -107,7 +137,7 @@ class ChannelSpec:
 
 def size_channels_for_velocity(
     chamber: ChamberConditions,
-    reference_radius_mm: float,
+    reference_radius_mm: float,      # the NARROWEST station, not the widest
     target_velocity: float,
     aspect_ratio: float = 2.5,
     land_mm: float = 0.8,
@@ -348,6 +378,21 @@ class CoolingSolution:
     coolant_inlet_temp: float = 0.0
     coolant_pressure_out: float = 0.0
     coolant_pressure_in: float = 0.0
+    t_coating_surface: np.ndarray | None = None
+    film_effectiveness_profile: np.ndarray | None = None
+    coating: "CoatingSpec | None" = None
+
+    @property
+    def peak_coating_temperature(self) -> float:
+        """Hottest point on the coating, which is not the hottest metal."""
+        return float(self.t_coating_surface.max()) if self.t_coating_surface is not None \
+            else self.peak_wall_temperature
+
+    @property
+    def coating_temperature_margin(self) -> float:
+        if self.coating is None or self.coating.thickness_mm <= 0.0:
+            return float("inf")
+        return self.coating.max_surface_temp - self.peak_coating_temperature
 
     @property
     def peak_heat_flux(self) -> float:
@@ -409,6 +454,9 @@ def solve_cooling(
     curvature_radius_mm: float,
     coolant_fraction: float = 1.0,
     inlet_pressure_bar: float | None = None,
+    film: "FilmSpec | None" = None,
+    coating: "CoatingSpec | None" = None,
+    channel_x_range: tuple[float, float] | None = None,
 ) -> CoolingSolution:
     """
     March the coolant from the last station to the first.
@@ -438,8 +486,29 @@ def solve_cooling(
     dt = float(throat_hydraulic_diameter_mm) * 1e-3
     rc = float(curvature_radius_mm) * 1e-3
 
+    # film effectiveness along the wall, zero upstream of the slot
+    if film is not None and film.fuel_fraction > 0.0:
+        mdot_film = chamber.mass_flow_fuel * film.fuel_fraction
+        slot_r = float(np.interp(film.inject_x_mm, wall_x_mm, wall_r_mm))
+        slot_area = 2.0 * math.pi * slot_r * 1e-3 * film.slot_height_mm * 1e-3
+        v_film = mdot_film / (prop.density_fuel * slot_area)
+        # blowing ratio against the core flow at the injector end
+        core_flux = chamber.mass_flow / max(math.pi * (slot_r * 1e-3) ** 2, 1e-9)
+        blowing = (prop.density_fuel * v_film) / max(core_flux, 1e-9)
+        eta_film = film_effectiveness(np.asarray(wall_x_mm, dtype=float),
+                                      film.inject_x_mm, film.slot_height_mm,
+                                      max(blowing, 0.05))
+        t_film = film.coolant_temp_k if film.coolant_temp_k > 0.0 else prop.coolant_inlet_t
+    else:
+        eta_film = np.zeros(n)
+        t_film = prop.coolant_inlet_t
+
+    r_coating = (coating.thickness_mm * 1e-3 / coating.conductivity
+                 if coating is not None and coating.thickness_mm > 0.0 else 0.0)
+
     q = np.zeros(n)
     t_aw = np.zeros(n)
+    t_coat = np.zeros(n)
     t_wg = np.zeros(n)
     t_wc = np.zeros(n)
     t_c = np.zeros(n)
@@ -487,13 +556,19 @@ def solve_cooling(
         hc_i = hc_bare * (width + 2.0 * eta * height) / pitch
 
         t_aw_i = adiabatic_wall_temperature(chamber.t_chamber, mach[i], gamma, pr_g)
+        t_aw_i = filmed_recovery_temperature(t_aw_i, eta_film[i], t_film)
+
+        # a station with no channel under it gets no coolant-side path at all
+        has_channel = (channel_x_range is None
+                       or channel_x_range[0] <= wall_x_mm[i] <= channel_x_range[1])
 
         # sigma depends on the wall temperature it is used to compute
         tw = t_wall_guess
         r_wall = channel.hot_wall_mm * 1e-3 / material.conductivity
+        r_cool = 1.0 / hc_i if has_channel else 1e9   # uncooled: no path out
         for _ in range(12):
             hg_i = bartz_coefficient(chamber, dt, rc, area_ratio[i], mach[i], tw)
-            r_total = 1.0 / hg_i + r_wall + 1.0 / hc_i
+            r_total = 1.0 / hg_i + r_coating + r_wall + r_cool
             q_i = (t_aw_i - t_cool) / r_total
             tw_new = t_aw_i - q_i / hg_i
             if abs(tw_new - tw) < 0.01:
@@ -503,7 +578,7 @@ def solve_cooling(
         t_wall_guess = tw
 
         hg_i = bartz_coefficient(chamber, dt, rc, area_ratio[i], mach[i], tw)
-        r_total = 1.0 / hg_i + r_wall + 1.0 / hc_i
+        r_total = 1.0 / hg_i + r_coating + r_wall + r_cool
         q_i = (t_aw_i - t_cool) / r_total
 
         # axial length this station is responsible for
@@ -521,7 +596,8 @@ def solve_cooling(
 
         q[i] = q_i
         t_aw[i] = t_aw_i
-        t_wg[i] = tw
+        t_coat[i] = tw                       # coating surface, or bare metal
+        t_wg[i] = tw - q_i * r_coating       # metal under the coating
         t_wc[i] = t_cool + q_i / hc_i
         t_c[i] = t_cool
         hg[i] = hg_i
@@ -551,6 +627,9 @@ def solve_cooling(
         coolant_mass_flow=mdot_c, total_heat=total_q,
         coolant_inlet_index=n - 1, coolant_outlet_index=0,
         coolant_max_temp=prop.coolant_max_t,
+        t_coating_surface=t_coat,
+        film_effectiveness_profile=eta_film,
+        coating=coating,
         coolant_outlet_temp=t_cool,
         coolant_inlet_temp=prop.coolant_inlet_t,
         coolant_pressure_out=p,
@@ -598,6 +677,10 @@ def search_cooling_design(
     max_pressure_drop_fraction: float = 0.5,
     search_stations: int = 80,
     min_channel_width_mm: float = 0.4,
+    min_hot_wall_mm: float = 0.3,
+    max_depth_mm: float = float("inf"),
+    film: "FilmSpec | None" = None,
+    coating: "CoatingSpec | None" = None,
 ) -> tuple[CoolingCandidate | None, list[CoolingCandidate]]:
     """
     Search channel geometry and material for a jacket that survives.
@@ -613,6 +696,28 @@ def search_cooling_design(
     at each candidate width and land, sweeps depth, hot wall and material, and
     keeps anything whose wall and coolant both stay inside their limits and
     whose pressure drop stays under a stated fraction of chamber pressure.
+
+    `min_hot_wall_mm` is the other process floor, and the one that usually
+    matters more. The search will happily pick the thinnest wall on offer,
+    because it is the largest single thermal resistance in the stack. A third of
+    a millimetre of metal between 3400 K gas and cryogenic methane is not
+    something a powder-bed machine holds reliably, and it is also too thin to
+    survive being meshed or CT inspected afterwards.
+
+    `reference_radius_mm` must be the smallest radius the channels have to run
+    round, not the largest. Packing at the widest station puts more channels on
+    the circumference than the narrowest one can hold, and they then have to
+    narrow to fit -- on this engine down to 0.27 mm from a designed 0.40 mm,
+    which is thinner than the process floor the search was given and too thin to
+    mesh or inspect. A real design bifurcates channels rather than starving
+    them; this one simply carries fewer, which is the conservative answer.
+
+    `max_depth_mm` is what the structure will actually give up. Hot wall plus
+    channel depth has to fit inside the wall with something left behind it, and
+    the search has no other reason to care how deep it goes -- left unbounded it
+    will take a 1.0 mm hot wall and a 1.6 mm channel out of a 3.0 mm wall and
+    leave 0.4 mm of backing, or ask for more than the wall has. Geometry
+    constrains the thermal design here, not the other way round.
 
     `min_channel_width_mm` is the process floor. It is worth setting well above
     the absolute minimum a machine can hold: the narrowest surviving design is
@@ -637,7 +742,10 @@ def search_cooling_design(
             for land in (0.4, 0.6, 0.8, 1.2):
                 n = channels_packed(reference_radius_mm, width, land)
                 for aspect in (1.5, 2.0, 3.0, 4.0):
-                    for hot_wall in (0.3, 0.4, 0.5, 0.7):
+                    for hot_wall in [h for h in (0.3, 0.4, 0.5, 0.7, 1.0)
+                                     if h >= min_hot_wall_mm - 1e-9]:
+                        if hot_wall + aspect * width > max_depth_mm + 1e-9:
+                            continue
                         ch = ChannelSpec(
                             n_channels=n,
                             width_mm=width,
@@ -650,6 +758,7 @@ def search_cooling_design(
                                 chamber, xs, rs, ars, ms, ch, material,
                                 throat_hydraulic_diameter_mm, curvature_radius_mm,
                                 coolant_fraction=coolant_fraction,
+                                film=film, coating=coating,
                             )
                         except (ValueError, ZeroDivisionError, OverflowError) as e:
                             evaluated.append(CoolingCandidate(
@@ -673,6 +782,10 @@ def search_cooling_design(
                             reasons.append(
                                 f"coolant laminar at Re {min(sol.reynolds):.0f}, "
                                 "Dittus-Boelter does not apply")
+                        if sol.coating_temperature_margin <= 0.0:
+                            reasons.append(
+                                f"coating surface {sol.peak_coating_temperature:.0f} K over "
+                                f"{coating.max_surface_temp:.0f} K and will spall")
 
                         survives = not reasons
                         # prefer margin, then a quiet circuit
@@ -686,3 +799,70 @@ def search_cooling_design(
     survivors = [c for c in evaluated if c.survives]
     best = max(survivors, key=lambda c: c.score) if survivors else None
     return best, evaluated
+
+
+# --------------------------------------------------------------------------
+# film cooling and thermal barrier coatings
+# --------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class FilmSpec:
+    """
+    A fuel film injected along the wall.
+
+    `fuel_fraction` is diverted from the injector, so it is fuel that does not
+    burn at the design mixture ratio. That costs specific impulse roughly in
+    proportion, which is the price of the wall surviving.
+    """
+    fuel_fraction: float = 0.0          # of total fuel
+    inject_x_mm: float = 0.0            # station where the film enters
+    slot_height_mm: float = 0.3
+    coolant_temp_k: float = 0.0         # 0 -> use the propellant inlet temperature
+
+
+@dataclass(frozen=True)
+class CoatingSpec:
+    """
+    Thermal barrier coating on the gas side.
+
+    Yttria-stabilised zirconia is about 1.0 W/(m K) against 290 for GRCop-42, so
+    a tenth of a millimetre of it is worth three millimetres of copper. It buys
+    hot-wall temperature at the cost of a coating surface that runs far hotter
+    and spalls if it is asked for too much.
+    """
+    thickness_mm: float = 0.0
+    conductivity: float = 1.0           # W/(m K), YSZ
+    max_surface_temp: float = 1600.0    # K
+
+
+def film_effectiveness(x_mm: np.ndarray, inject_x_mm: float, slot_height_mm: float,
+                       blowing_ratio: float, gas_velocity_ratio: float = 1.0):
+    """
+    Adiabatic film effectiveness downstream of a slot.
+
+    Correlation of the classic slot-film form: effectiveness holds near unity
+    for a short potential core and then decays with the turbulent mixing
+    parameter x/(M s). Upstream of the slot it is zero -- film cools what is
+    behind it and nothing in front.
+
+    eta = 1 / (1 + 0.0329 * xi^0.8),  xi = x / (M * s)
+
+    This is a correlation, and film cooling in a real chamber is worse than any
+    correlation because the film is also burning. Treat it as an upper bound.
+    """
+    xi = np.maximum(x_mm - inject_x_mm, 0.0) / max(blowing_ratio * slot_height_mm, 1e-6)
+    eta = 1.0 / (1.0 + 0.0329 * np.power(np.maximum(xi, 0.0), 0.8))
+    return np.where(x_mm >= inject_x_mm, np.clip(eta, 0.0, 1.0), 0.0)
+
+
+def filmed_recovery_temperature(t_aw: np.ndarray, eta: np.ndarray,
+                                t_film: float) -> np.ndarray:
+    """
+    Driving temperature the wall actually sees under a film.
+
+        T_aw,eff = T_aw - eta * (T_aw - T_film)
+
+    At eta = 1 the wall sees coolant temperature; at eta = 0 it sees the full
+    recovery temperature and the film has been consumed.
+    """
+    return t_aw - eta * (t_aw - t_film)

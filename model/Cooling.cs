@@ -27,12 +27,29 @@
 
 namespace AerospikeCE
 {
+    /// <summary>
+    /// Thermal and mechanical properties.
+    ///
+    /// Yield and modulus are quoted at room temperature and derated linearly to
+    /// zero at the melting point -- crude, but it captures what matters: a hot
+    /// wall is much weaker than a cold one, and the hot wall is where the
+    /// stress is. Ductility and the fatigue exponent feed a Coffin-Manson life
+    /// estimate, because regen chambers fail by thermal-strain ratchetting over
+    /// tens to hundreds of cycles rather than by bursting.
+    /// </summary>
     public sealed class Material
     {
         public string Name = "";
-        public double Conductivity;    // W/(m K)
-        public double MaxWallTemp;     // K
-        public double Density;         // kg/m^3
+        public double Conductivity;             // W/(m K)
+        public double MaxWallTemp;              // K
+        public double Density;                  // kg/m^3
+        public double YoungsModulus = 120e9;    // Pa at 293 K
+        public double Poisson = 0.33;
+        public double YieldStrength = 300e6;    // Pa at 293 K
+        public double Expansion = 17e-6;        // 1/K
+        public double MeltingPoint = 1600.0;    // K
+        public double FatigueDuctility = 0.35;  // Coffin-Manson eps_f'
+        public double FatigueExponent = -0.6;   // Coffin-Manson c
     }
 
     public sealed class ChannelSpec
@@ -57,6 +74,35 @@ namespace AerospikeCE
             => (2.0 * Math.PI * radiusMm / NChannels - WidthMm) / WidthMm;
     }
 
+    /// <summary>
+    /// A fuel film injected along the wall. Port of FilmSpec in cooling_ref.py.
+    ///
+    /// FuelFraction is diverted from the injector, so it is fuel that does not
+    /// burn at the design mixture ratio. Combustion.cs charges it for that.
+    /// </summary>
+    public sealed class FilmSpec
+    {
+        public double FuelFraction;          // of total fuel
+        public double InjectXMm;
+        public double SlotHeightMm = 0.3;
+        public double CoolantTempK;          // 0 -> propellant inlet temperature
+    }
+
+    /// <summary>
+    /// Thermal barrier coating on the gas side.
+    ///
+    /// YSZ is about 1.0 W/(m K) against 290 for GRCop-42, so a tenth of a
+    /// millimetre is worth three millimetres of copper. It buys hot-wall
+    /// temperature at the cost of a coating surface that runs far hotter and
+    /// spalls if asked for too much.
+    /// </summary>
+    public sealed class CoatingSpec
+    {
+        public double ThicknessMm;
+        public double Conductivity = 1.0;
+        public double MaxSurfaceTemp = 1600.0;
+    }
+
     public sealed class CoolingSolution
     {
         public double[] X = Array.Empty<double>();
@@ -65,6 +111,11 @@ namespace AerospikeCE
         public double[] TWallCoolant = Array.Empty<double>();
         public double[] TCoolant = Array.Empty<double>();
         public double[] Reynolds = Array.Empty<double>();
+        public double[] TCoatingSurface = Array.Empty<double>();
+        public double[] TAdiabatic = Array.Empty<double>();
+        public double[] FilmEffectiveness = Array.Empty<double>();
+        public double[] WallRadiusMm = Array.Empty<double>();
+        public CoatingSpec? Coating;
 
         public Material Material = null!;
         public ChannelSpec Channel = null!;
@@ -81,6 +132,15 @@ namespace AerospikeCE
         public double CoolantTemperatureRise => CoolantOutletTemp - CoolantInletTemp;
         public double PressureDrop => PressureIn - PressureOut;
         public double WallTemperatureMargin => Material.MaxWallTemp - PeakWallTemperature;
+
+        /// <summary>Hottest point on the coating, which is not the hottest metal.</summary>
+        public double PeakCoatingTemperature =>
+            TCoatingSurface.Length > 0 ? TCoatingSurface.Max() : PeakWallTemperature;
+
+        public double CoatingTemperatureMargin =>
+            Coating is null || Coating.ThicknessMm <= 0.0
+                ? double.PositiveInfinity
+                : Coating.MaxSurfaceTemp - PeakCoatingTemperature;
         public double CoolantTemperatureMargin => CoolantMaxTemp - CoolantOutletTemp;
         public double MinReynolds => Reynolds.Min();
         public double MaxReynolds => Reynolds.Max();
@@ -100,9 +160,24 @@ namespace AerospikeCE
     {
         public static readonly Dictionary<string, Material> Materials = new()
         {
-            ["inconel718"] = new Material { Name = "inconel718", Conductivity = 25.0, MaxWallTemp = 1150.0, Density = 8190.0 },
-            ["cucrzr"] = new Material { Name = "cucrzr", Conductivity = 320.0, MaxWallTemp = 800.0, Density = 8890.0 },
-            ["grcop42"] = new Material { Name = "grcop42", Conductivity = 290.0, MaxWallTemp = 1000.0, Density = 8756.0 },
+            ["inconel718"] = new Material
+            {
+                Name = "inconel718", Conductivity = 25.0, MaxWallTemp = 1150.0, Density = 8190.0,
+                YoungsModulus = 200e9, Poisson = 0.29, YieldStrength = 1030e6,
+                Expansion = 13e-6, MeltingPoint = 1610.0, FatigueDuctility = 0.25,
+            },
+            ["cucrzr"] = new Material
+            {
+                Name = "cucrzr", Conductivity = 320.0, MaxWallTemp = 800.0, Density = 8890.0,
+                YoungsModulus = 128e9, Poisson = 0.34, YieldStrength = 280e6,
+                Expansion = 17e-6, MeltingPoint = 1350.0, FatigueDuctility = 0.40,
+            },
+            ["grcop42"] = new Material
+            {
+                Name = "grcop42", Conductivity = 290.0, MaxWallTemp = 1000.0, Density = 8756.0,
+                YoungsModulus = 110e9, Poisson = 0.34, YieldStrength = 190e6,
+                Expansion = 17.5e-6, MeltingPoint = 1350.0, FatigueDuctility = 0.45,
+            },
         };
 
         public static double GasCp(double gamma, double molarMass)
@@ -180,6 +255,28 @@ namespace AerospikeCE
             return ml > 1e-9 ? Math.Tanh(ml) / ml : 1.0;
         }
 
+        /// <summary>
+        /// Adiabatic film effectiveness downstream of a slot.
+        ///
+        ///     eta = 1 / (1 + 0.0329 * xi^0.8),   xi = x / (M * s)
+        ///
+        /// Zero upstream of the slot: a film cools what is behind it and nothing
+        /// in front. This is a correlation, and a real film is worse than any
+        /// correlation because it is also burning. Treat it as an upper bound.
+        /// </summary>
+        public static double FilmEffectiveness(double xMm, double injectXMm,
+                                               double slotHeightMm, double blowingRatio)
+        {
+            if (xMm < injectXMm) return 0.0;
+            double xi = Math.Max(xMm - injectXMm, 0.0)
+                        / Math.Max(blowingRatio * slotHeightMm, 1e-6);
+            return Math.Clamp(1.0 / (1.0 + 0.0329 * Math.Pow(Math.Max(xi, 0.0), 0.8)), 0.0, 1.0);
+        }
+
+        /// <summary>T_aw,eff = T_aw - eta (T_aw - T_film).</summary>
+        public static double FilmedRecoveryTemperature(double tAw, double eta, double tFilm)
+            => tAw - eta * (tAw - tFilm);
+
         public static int ChannelsPacked(double referenceRadiusMm, double widthMm, double landMm)
             => Math.Max(1, (int)(2.0 * Math.PI * referenceRadiusMm / (widthMm + landMm)));
 
@@ -196,7 +293,9 @@ namespace AerospikeCE
             ChamberConditions chamber, double[] wallXMm, double[] wallRMm,
             double[] areaRatio, double[] mach, ChannelSpec channel, Material material,
             double throatHydraulicDiameterMm, double curvatureRadiusMm,
-            double coolantFraction = 1.0, double? inletPressureBar = null)
+            double coolantFraction = 1.0, double? inletPressureBar = null,
+            FilmSpec? film = null, CoatingSpec? coating = null,
+            (double lo, double hi)? channelXRange = null)
         {
             int n = wallXMm.Length;
             if (wallRMm.Length != n || areaRatio.Length != n || mach.Length != n)
@@ -216,7 +315,29 @@ namespace AerospikeCE
             double rc = curvatureRadiusMm * 1e-3;
             double prG = GasPrandtl(p.Gamma);
 
+            // film effectiveness along the wall, zero upstream of the slot
+            var etaFilm = new double[n];
+            double tFilm = p.CoolantInletT;
+            if (film is not null && film.FuelFraction > 0.0)
+            {
+                double mdotFilm = chamber.MassFlowFuel * film.FuelFraction;
+                double slotR = EngineAssembly.Interp(wallXMm, wallRMm, film.InjectXMm);
+                double slotArea = 2.0 * Math.PI * slotR * 1e-3 * film.SlotHeightMm * 1e-3;
+                double vFilm = mdotFilm / (p.DensityFuel * slotArea);
+                double coreFlux = chamber.MassFlow / Math.Max(Math.PI * Math.Pow(slotR * 1e-3, 2), 1e-9);
+                double blowing = Math.Max((p.DensityFuel * vFilm) / Math.Max(coreFlux, 1e-9), 0.05);
+                for (int i = 0; i < n; i++)
+                    etaFilm[i] = FilmEffectiveness(wallXMm[i], film.InjectXMm,
+                                                   film.SlotHeightMm, blowing);
+                if (film.CoolantTempK > 0.0) tFilm = film.CoolantTempK;
+            }
+
+            double rCoating = coating is not null && coating.ThicknessMm > 0.0
+                ? coating.ThicknessMm * 1e-3 / coating.Conductivity : 0.0;
+
             var q = new double[n];
+            var tCoat = new double[n];
+            var tAw = new double[n];
             var twg = new double[n];
             var twc = new double[n];
             var tc = new double[n];
@@ -250,22 +371,29 @@ namespace AerospikeCE
                 double eta = FinEfficiency(hcBare, material.Conductivity, land, height);
                 double hcI = hcBare * (width + 2.0 * eta * height) / pitch;
 
-                double tAw = AdiabaticWallTemperature(chamber.TChamber, mach[i], p.Gamma, prG);
+                double tAwI = AdiabaticWallTemperature(chamber.TChamber, mach[i], p.Gamma, prG);
+                tAwI = FilmedRecoveryTemperature(tAwI, etaFilm[i], tFilm);
+
+                bool hasChannel = channelXRange is null
+                    || (wallXMm[i] >= channelXRange.Value.lo
+                        && wallXMm[i] <= channelXRange.Value.hi);
+                double rCool = hasChannel ? 1.0 / hcI : 1e9;   // uncooled: no path out
+
                 double rWall = channel.HotWallMm * 1e-3 / material.Conductivity;
 
                 double tw = tWallGuess;
                 for (int it = 0; it < 12; it++)
                 {
                     double hg = BartzCoefficient(chamber, dt, rc, areaRatio[i], mach[i], tw);
-                    double qI2 = (tAw - tCool) / (1.0 / hg + rWall + 1.0 / hcI);
-                    double twNew = tAw - qI2 / hg;
+                    double qI2 = (tAwI - tCool) / (1.0 / hg + rCoating + rWall + rCool);
+                    double twNew = tAwI - qI2 / hg;
                     if (Math.Abs(twNew - tw) < 0.01) { tw = twNew; break; }
                     tw = 0.5 * (tw + twNew);
                 }
                 tWallGuess = tw;
 
                 double hgI = BartzCoefficient(chamber, dt, rc, areaRatio[i], mach[i], tw);
-                double qI = (tAw - tCool) / (1.0 / hgI + rWall + 1.0 / hcI);
+                double qI = (tAwI - tCool) / (1.0 / hgI + rCoating + rWall + rCool);
 
                 double seg = k == 0
                     ? Math.Abs(wallXMm[i] - wallXMm[i - 1]) * 1e-3
@@ -274,7 +402,13 @@ namespace AerospikeCE
                 double heat = qI * (pitch * seg) * channel.NChannels;
                 totalQ += heat;
 
-                q[i] = qI; twg[i] = tw; twc[i] = tCool + qI / hcI; tc[i] = tCool; re[i] = reI;
+                q[i] = qI;
+                tAw[i] = tAwI;
+                tCoat[i] = tw;                       // coating surface, or bare metal
+                twg[i] = tw - qI * rCoating;         // metal under the coating
+                twc[i] = tCool + qI / hcI;
+                tc[i] = tCool;
+                re[i] = reI;
 
                 tCool += heat / (mdotC * p.CoolantCp);
                 double f = FrictionFactor(reI, rough / dH);
@@ -285,6 +419,8 @@ namespace AerospikeCE
             {
                 X = wallXMm, HeatFlux = q, TWallGas = twg, TWallCoolant = twc,
                 TCoolant = tc, Reynolds = re,
+                TCoatingSurface = tCoat, TAdiabatic = tAw, FilmEffectiveness = etaFilm,
+                WallRadiusMm = wallRMm, Coating = coating,
                 Material = material, Channel = channel,
                 CoolantMassFlow = mdotC, TotalHeat = totalQ,
                 CoolantInletTemp = p.CoolantInletT, CoolantOutletTemp = tCool,
@@ -318,7 +454,9 @@ namespace AerospikeCE
             double throatHydraulicDiameterMm, double curvatureRadiusMm,
             double referenceRadiusMm, string[] materials,
             double coolantFraction = 1.0, double maxPressureDropFraction = 0.5,
-            int searchStations = 80)
+            int searchStations = 80, double minChannelWidthMm = 0.4,
+            double minHotWallMm = 0.3, double maxDepthMm = double.PositiveInfinity,
+            FilmSpec? film = null, CoatingSpec? coating = null)
         {
             double[] xs = Downsample(wallXMm, searchStations);
             double[] rs = Downsample(wallRMm, searchStations);
@@ -331,13 +469,16 @@ namespace AerospikeCE
             foreach (string matName in materials)
             {
                 Material material = Materials[matName];
-                foreach (double width in new[] { 0.4, 0.5, 0.6, 0.8 })
+                foreach (double width in new[] { 0.4, 0.5, 0.6, 0.8, 1.0, 1.2 }
+                             .Where(w => w >= minChannelWidthMm - 1e-9))
                     foreach (double land in new[] { 0.4, 0.6, 0.8, 1.2 })
                     {
                         int nCh = ChannelsPacked(referenceRadiusMm, width, land);
                         foreach (double aspect in new[] { 1.5, 2.0, 3.0, 4.0 })
-                            foreach (double hotWall in new[] { 0.3, 0.4, 0.5, 0.7 })
+                            foreach (double hotWall in new[] { 0.3, 0.4, 0.5, 0.7, 1.0 }
+                                         .Where(h => h >= minHotWallMm - 1e-9))
                             {
+                                if (hotWall + aspect * width > maxDepthMm + 1e-9) continue;
                                 var ch = new ChannelSpec
                                 {
                                     NChannels = nCh, WidthMm = width, HeightMm = aspect * width,
@@ -348,7 +489,7 @@ namespace AerospikeCE
                                 {
                                     sol = Solve(chamber, xs, rs, ars, ms, ch, material,
                                                 throatHydraulicDiameterMm, curvatureRadiusMm,
-                                                coolantFraction);
+                                                coolantFraction, null, film, coating);
                                 }
                                 catch (Exception e)
                                 {
@@ -370,6 +511,9 @@ namespace AerospikeCE
                                     reasons.Add($"drop {sol.PressureDrop / 1e5:F1} bar over {dpLimit / 1e5:F1} bar");
                                 if (sol.MinReynolds < 2300.0)
                                     reasons.Add($"coolant laminar at Re {sol.MinReynolds:F0}, Dittus-Boelter does not apply");
+                                if (sol.CoatingTemperatureMargin <= 0.0)
+                                    reasons.Add($"coating surface {sol.PeakCoatingTemperature:F0} K over " +
+                                                $"{coating!.MaxSurfaceTemp:F0} K and will spall");
 
                                 double score = Math.Min(sol.WallTemperatureMargin, sol.CoolantTemperatureMargin)
                                              - 30.0 * sol.PressureDrop / chamber.ChamberPressure;

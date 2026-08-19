@@ -160,7 +160,8 @@ namespace AerospikeCE
             Propellant p, double mixtureRatio, double chamberPressureBar,
             double throatAreaMm2, double expansionRatio, double exitMach,
             double ambientPressurePa = 101325.0,
-            double cStarEfficiency = 0.94, double truncationEfficiency = 0.99)
+            double cStarEfficiency = 0.94, double truncationEfficiency = 0.99,
+            double filmFraction = 0.0, double filmCombustionEfficiency = 0.5)
         {
             if (chamberPressureBar <= 0.0)
                 throw new ArgumentException("chamber pressure must be positive");
@@ -172,7 +173,16 @@ namespace AerospikeCE
             double pc = chamberPressureBar * 1e5;
             double at = throatAreaMm2 * 1e-6;
 
-            double cStar = Combustion.CStarIdeal(p, mixtureRatio) * cStarEfficiency;
+            if (filmFraction < 0.0 || filmFraction >= 1.0)
+                throw new ArgumentException("film_fraction must be in [0, 1)");
+
+            // Fuel spent on the film is charged at a reduced combustion
+            // efficiency. It runs along the wall fuel-rich and only partly
+            // reacts, carrying mass through the nozzle without contributing its
+            // full share of energy. Free film cooling would be a free lunch.
+            double filmPenalty = 1.0 - filmFraction * (1.0 - filmCombustionEfficiency)
+                                 / (1.0 + mixtureRatio);
+            double cStar = Combustion.CStarIdeal(p, mixtureRatio) * cStarEfficiency * filmPenalty;
             if (cStar <= 0.0)
                 throw new ArgumentException("mixture ratio is far enough off peak that c* collapses");
 
@@ -224,7 +234,8 @@ namespace AerospikeCE
             var o = spec.Operation;
             return Build(p, o.MixtureRatio, o.ChamberPressureBar, throatAreaMm2,
                          expansionRatio, exitMach, o.AmbientPressurePa,
-                         o.CStarEfficiency, o.TruncationEfficiency);
+                         o.CStarEfficiency, o.TruncationEfficiency,
+                         spec.Film.FuelFraction, spec.Film.CombustionEfficiency);
         }
     }
 }
