@@ -159,25 +159,33 @@ def main() -> None:
         print(f"{'':11s} volume {mv / 1000:8.2f} cm3 against {want / 1000:8.2f} expected "
               f"({solid / 1000:.2f} solid less features)  -> {err * 100:.2f}%")
 
-        # the head is small enough to ship welded and decimated
-        if part == "head" and args.decimate > 0.0 and g == want_g:
+        # A part whose topology is provable and whose verified mesh decimates
+        # cleanly is better shipped as that mesh than as a fresh stream: the
+        # streamed one is larger, and nothing has checked it.
+        path = os.path.join(args.out, f"{name}_{part}.stl")
+        shipped = False
+        if args.decimate > 0.0 and want_g >= 0 and g == want_g:
             for keep in (0.03, 0.05, 0.08, 0.12, 0.20):
                 v2, f2 = decimate(v, f, keep)
                 if genus_of(v2, f2) == want_g and manifold_report(v2, f2)["watertight"]:
-                    v, f = v2, f2
-                    print(f"{'':11s} decimated to {len(f):8d} tris at keep {keep:.2f}, "
-                          f"topology intact")
+                    dv = abs(mesh_volume(v2, f2) - want) / abs(want)
+                    write_binary_stl(path, v2, f2, f"{name}_{part}")
+                    print(f"{'':11s} decimated to {len(f2):8d} tris at keep {keep:.2f}, "
+                          f"genus and watertightness intact, volume {dv * 100:.2f}%")
+                    print(f"{'':11s} -> {os.path.basename(path)} "
+                          f"({os.path.getsize(path) / 1e6:.0f} MB), verified")
+                    shipped = True
                     break
         del v, f
 
-        # ---- deliverable, streamed at inspection resolution -----------------
-        path = os.path.join(args.out, f"{name}_{part}.stl")
-        t0 = time.time()
-        tris = stream_mesh_to_stl(path, a.profiles[part], voxel_mm=voxel,
-                                  channels=ch, ports=pt, holes=hl)
-        print(f"{'':11s} streamed @{voxel:.3f}mm {time.time() - t0:5.0f}s  "
-              f"tris {tris:9d}  -> {os.path.basename(path)} "
-              f"({os.path.getsize(path) / 1e6:.0f} MB)")
+        # ---- otherwise stream at inspection resolution ----------------------
+        if not shipped:
+            t0 = time.time()
+            tris = stream_mesh_to_stl(path, a.profiles[part], voxel_mm=voxel,
+                                      channels=ch, ports=pt, holes=hl)
+            print(f"{'':11s} streamed @{voxel:.3f}mm {time.time() - t0:5.0f}s  "
+                  f"tris {tris:9d}  -> {os.path.basename(path)} "
+                  f"({os.path.getsize(path) / 1e6:.0f} MB)")
         print()
 
 
