@@ -1,8 +1,9 @@
 out/
-vendor/
 bin/
 obj/
 __pycache__/
 .pytest_cache/
 *.stl
 *.vdb
+.venv/
+venv/

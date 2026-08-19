@@ -30,22 +30,26 @@ supported out of the box. Check `vendor/PicoGK/native/` after cloning.
 ## Setup
 
 ```bash
-# 1. .NET 9 SDK
-#    https://dotnet.microsoft.com/download
+# 1. clone, with the LEAP 71 stack
+#    PicoGK and ShapeKernel are submodules under vendor/, pinned to
+#    PicoGK v2.3.0 and ShapeKernel v2.1.0.
+git clone --recurse-submodules https://github.com/DanielTea/aerospike-ce.git
+cd aerospike-ce
 
-# 2. clone the LEAP 71 stack into vendor/
-git init
-mkdir -p vendor
-git submodule add https://github.com/leap71/PicoGK.git vendor/PicoGK
-git submodule add https://github.com/leap71/LEAP71_ShapeKernel.git vendor/LEAP71_ShapeKernel
-git submodule update --init --recursive
+#    already cloned without --recurse-submodules?
+#    git submodule update --init --recursive
+
+# 2. .NET 9 SDK
+#    https://dotnet.microsoft.com/download
 
 # 3. install the PicoGK runtime for your platform
 #    https://github.com/leap71/PicoGK/releases
 #    macOS: install the .pkg. Windows: run the installer.
 
-# 4. python side
+# 4. python side -- needs Python 3.9 or newer (matplotlib 3.8 floor).
+#    A system python older than that will fail to resolve requirements.txt.
 cd validate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 pytest -q          # 15 tests, all should pass
 cd ..
@@ -107,3 +111,10 @@ Journal 2(10), 1964.
    paying for itself over b-rep.
 4. Then the real exercise: replace the straight cowl with something derived from
    an actual requirement rather than a constant.
+
+## License
+
+Apache-2.0, matching the upstream LEAP 71 stack. See `LICENSE`.
+
+PicoGK and LEAP 71 ShapeKernel are vendored as submodules and remain under their
+own Apache-2.0 licences and copyright.
