@@ -26,7 +26,7 @@
     "lip_thickness_mm": 1.0,
     "base_cap_thickness_mm": 4.0,
     "head_thickness_mm": 6.0,
-    "flange_width_mm": 10.0
+    "flange_width_mm": 22.0
   },
 
   "propellant": {
