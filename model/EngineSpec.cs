@@ -112,6 +112,17 @@ namespace AerospikeCE
         [JsonPropertyName("export_spike")] public bool ExportSpike { get; set; } = true;
         [JsonPropertyName("export_cowl")]  public bool ExportCowl { get; set; } = true;
         [JsonPropertyName("export_head")]  public bool ExportHead { get; set; } = true;
+
+        /// <summary>
+        /// Close the viewer once the model has been built and exported.
+        ///
+        /// False leaves the window up so a human can turn the part around,
+        /// which is the point of having a viewer. True is what any automated
+        /// run needs: otherwise the process sits there until somebody clicks
+        /// the close box, and a scripted build hangs forever having already
+        /// done all its work.
+        /// </summary>
+        [JsonPropertyName("exit_when_done")] public bool ExitWhenDone { get; set; } = false;
     }
 
     public sealed class EngineSpec

@@ -32,8 +32,12 @@ namespace AerospikeCE
             // are both a comma.
             CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
 
-            if (args.Length > 0)
-                _specPath = args[0];
+            // --exit-when-done overrides the spec, so a scripted run does not
+            // need its own spec file just to avoid hanging on the viewer.
+            bool bExitFlag = args.Any(a => a == "--exit-when-done");
+            string[] astrPositional = args.Where(a => !a.StartsWith("--")).ToArray();
+            if (astrPositional.Length > 0)
+                _specPath = astrPositional[0];
 
             if (!File.Exists(_specPath))
             {
@@ -44,7 +48,8 @@ namespace AerospikeCE
             try
             {
                 EngineSpec oSpec = EngineSpec.Load(_specPath);
-                Library.Go(oSpec.Geometry.VoxelSizeMm, Task);
+                Library.Go(oSpec.Geometry.VoxelSizeMm, Task,
+                           bEndAppWithTask: bExitFlag || oSpec.Output.ExitWhenDone);
             }
             catch (Exception e)
             {
