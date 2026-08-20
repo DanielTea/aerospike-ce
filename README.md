@@ -103,7 +103,10 @@ The viewer window opens, STLs land in `out/`.
 edit spec/demo.json
         |
         v
-pytest                              ->  invariants hold
+python pipeline.py                  ->  physics    the numbers
+                                        geometry   the shapes, and the seam
+                                        watertight the solid they close into
+                                        slicing    what a slicer reads
         |
         v
 python plot_contour.py              ->  out/contour.png     <- look at this
@@ -115,8 +118,17 @@ python mesh_export.py               ->  out/engine_3d.png   <- and this
 dotnet run --project model          ->  voxel model, viewer, out/*.stl
         |
         v
+python print_ready.py               ->  the 3MF, or a refusal
+python verify_print_file.py         ->  the same gates, re-derived from disk
+        |
+        v
 slicer
 ```
+
+`pipeline.py` is the gate, and `pytest` is one stage of it. Every test module in
+the repository belongs to exactly one stage and the pipeline refuses to run if
+one belongs to none. [docs/pipeline](docs/pipeline/README.md) lists every gate,
+what it proves, and which shipped defect it exists because of.
 
 The PNG step exists because a coding agent cannot see the 3D viewer. Skipping it
 is how you end up with a confidently generated part that is quietly wrong.
@@ -372,6 +384,22 @@ base topology of the revolved profile. A channel that has broken through its
 wall, merged with its neighbour, or been closed by over-aggressive decimation
 all leave a mesh that is still watertight and still looks right; the genus is
 what catches them.
+
+Watertight is not the same as printable, and the gap is wider than it looks.
+Four separate defects have shipped past a mesh reporting watertight at the
+correct genus: a triangle with no area, a duplicated face, a patch wound inside
+out, and a vertex where the surface pinches against itself. Each is an ordinary
+face by index -- two neighbours on every edge, so the edge arithmetic is content
+-- and each is something a slicer reads and refuses. That is what the pipeline's
+slicing stage is for.
+
+Marching cubes also places its vertices in single precision, in *index* units.
+Out at index 1024 that resolves about 6e-5 of an index, so a crossing a
+nanometre off a sample is placed exactly on it, and so is every other edge into
+that sample; the weld then merges what the mesher meant to keep apart. The cowl
+did that once in 24 million triangles. `hold_off_level` keeps every sample a
+derived distance clear of the level, on the side it was already on, so no cell
+changes classification and the surface moves by at most a micron.
 
 Decimation then runs as far as the topology survives and no further. On the head
 that is 5 percent of the triangles at exactly the right genus; at 3 percent the
