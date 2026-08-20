@@ -160,6 +160,13 @@ def reduce_safely(verts, faces, target_ratio: float, tol_volume: float = 0.02):
         rep = check(v2, f2, f"keep {ratio:.2f}")
         if not rep["watertight"] or rep["surfaces"] != base["surfaces"]:
             break
+        # A quadric collapse can slide three vertices into a line without
+        # breaking a single edge pairing, so this has to be asked separately.
+        # The field carries no zero-area triangles once it is meshed off the
+        # bias; the decimator puts them back, and every other check here says
+        # the result is fine. export_cooled applies the same criterion.
+        if rep["degenerate_faces"] > base["degenerate_faces"]:
+            break
         if rep["genus"] != base["genus"]:
             break
         if abs(rep["volume_mm3"] - base["volume_mm3"]) > tol_volume * abs(base["volume_mm3"]):

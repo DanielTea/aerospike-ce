@@ -188,3 +188,28 @@ def test_one_solid_leaves_nothing_loose():
     v, f = _mesh(_radius() - 8.0)
     from print_ready import loose_pieces
     assert loose_pieces(v, f) == []
+
+
+def test_decimation_refuses_a_step_that_flattens_triangles(monkeypatch):
+    """
+    Quadric collapse can slide three vertices into a line without breaking any
+    edge pairing. The mesh stays watertight, keeps its genus, keeps its volume,
+    and acquires faces with no normal -- which is the one thing a slicer reads
+    and none of the other checks do.
+    """
+    import print_ready
+
+    r = _radius()
+    v, f = _mesh(r - 8.0)
+
+    def spy(verts, faces, ratio):
+        out = verts.copy()
+        # collapse one triangle onto a line, leaving the topology untouched
+        a, b, c = faces[0]
+        out[c] = 0.5 * (out[a] + out[b])
+        return out, faces
+
+    monkeypatch.setattr(print_ready, "decimate", spy)
+    _, out, rep = print_ready.reduce_safely(v, f, target_ratio=0.5)
+    assert rep["degenerate_faces"] == 0, "kept a mesh with a flattened face"
+    assert len(out) == len(f), "should have fallen back to the base mesh"
