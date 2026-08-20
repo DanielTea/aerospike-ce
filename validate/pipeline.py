@@ -329,7 +329,8 @@ def mesh_parts(design, voxel_mm: float, verbose: bool = True):
     return parts, fields
 
 
-def stage_watertight(design, parts, fields, voxel_mm, narrow, resolved: bool) -> Stage:
+def stage_watertight(design, parts, fields, voxel_mm, narrow, resolved: bool,
+                     from_file: str | None = None) -> Stage:
     """
     Does it close, and is it one solid with a way out of every cavity.
 
@@ -337,14 +338,24 @@ def stage_watertight(design, parts, fields, voxel_mm, narrow, resolved: bool) ->
     at all. Below that, closure and connectivity still mean something and the
     genus does not: at 0.6 mm the cowl reports 709 handles and at 0.233 mm it
     reports 392, because at 0.6 mm most of what it is counting is aliasing.
+
+    Given a written file, the same questions are asked of what is on disk. The
+    resolution gate goes with the mesher and is skipped: a file does not carry
+    the voxel it was built at, and asserting one from the spec would be
+    checking the spec against itself.
     """
     st = Stage("watertight")
     run_tests(st, TEST_MODULES["watertight"])
-    st.add("resolution", voxel_mm <= narrow / 3.0 + 1e-9,
-           f"voxel {voxel_mm:.3f} mm against {narrow:.2f} mm narrowest "
-           f"({narrow / voxel_mm:.1f} samples across)"
-           + ("" if resolved else "  -- screening only, genus not asserted"),
-           skipped=not resolved)
+    if from_file:
+        st.add("resolution", True,
+               f"not asked of a written file; {os.path.basename(from_file)} "
+               f"carries no voxel size", skipped=True)
+    else:
+        st.add("resolution", voxel_mm <= narrow / 3.0 + 1e-9,
+               f"voxel {voxel_mm:.3f} mm against {narrow:.2f} mm narrowest "
+               f"({narrow / voxel_mm:.1f} samples across)"
+               + ("" if resolved else "  -- screening only, genus not asserted"),
+               skipped=not resolved)
 
     for name, (v, f) in parts.items():
         rep = manifold_report(v, f)
@@ -393,7 +404,7 @@ def stage_watertight(design, parts, fields, voxel_mm, narrow, resolved: bool) ->
     return st
 
 
-def stage_slicing(parts, path: str | None = None) -> Stage:
+def stage_slicing(parts, path: str | None = None, unit: str | None = None) -> Stage:
     """
     Everything a slicer reads that the edge arithmetic never looks at.
 
@@ -405,12 +416,10 @@ def stage_slicing(parts, path: str | None = None) -> Stage:
     run_tests(st, TEST_MODULES["slicing"])
 
     if path:
-        doc = read_3mf(path)
-        st.add("file states its unit", doc["unit"] == "millimeter",
-               f"{doc['unit']}, {os.path.getsize(path) / 1e6:.1f} MB")
-        st.add("file carries every solid", bool(doc["objects"]),
-               f"{len(doc['objects'])} objects: {', '.join(doc['objects'])}")
-        parts = doc["objects"]
+        st.add("file states its unit", unit == "millimeter",
+               f"{unit}, {os.path.getsize(path) / 1e6:.1f} MB")
+        st.add("file carries every solid", bool(parts),
+               f"{len(parts)} objects: {', '.join(parts)}")
         where = os.path.basename(path)
     else:
         where = "in memory"
@@ -497,7 +506,18 @@ def main() -> int:
           f"depth {args.depth} (voxel {voxel:.3f} mm, print voxel {print_voxel:.3f} mm)")
     print()
 
-    parts, fields = None, {}
+    # A written file replaces the mesher for both mesh stages: the gates are
+    # then asked of exactly what a slicer would open, which is the point of
+    # having a file to check at all.
+    parts, fields, unit = None, {}, None
+    if args.file:
+        doc = read_3mf(args.file)
+        parts, unit = doc["objects"], doc["unit"]
+        shown = os.path.relpath(args.file, HERE)
+        if len(shown) > len(args.file):
+            shown = args.file
+        print(f"  reading {shown}: {len(parts)} objects, unit {unit}\n")
+
     stages: list[Stage] = []
     for name in STAGES:
         if name not in wanted:
@@ -511,11 +531,12 @@ def main() -> int:
         elif name == "watertight":
             if parts is None:
                 parts, fields = mesh_parts(design, voxel)
-            st = stage_watertight(design, parts, fields, voxel, narrow, resolved)
+            st = stage_watertight(design, parts, fields, voxel, narrow, resolved,
+                                  from_file=args.file)
         else:
-            if args.file is None and parts is None:
+            if parts is None:
                 parts, fields = mesh_parts(design, voxel)
-            st = stage_slicing(parts or {}, args.file)
+            st = stage_slicing(parts, args.file, unit)
         st.seconds = time.time() - t0
         stages.append(st)
         for c in st.checks:

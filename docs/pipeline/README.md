@@ -110,8 +110,19 @@ Runs `test_print_ready`, then, on the meshes or on a written file:
 | file states its unit | 3MF says millimetre | STL does not say anything, and every slicer guesses |
 | file carries every solid | all three objects arrived | |
 
-Given `--file`, all of it is re-derived from what is on disk rather than from
-what was in memory, because the writer is the part a slicer actually sees.
+Given `--file`, **both** mesh stages read the written file instead of meshing:
+every gate is then asked of exactly what a slicer would open, rather than of
+what was in memory when it was written. That is the whole point of having a file
+to check. Two gates are skipped with a reason rather than faked — a 3MF does not
+carry the voxel it was built at, and it does not carry the field its volume
+should be compared against.
+
+This is the release gate:
+
+```bash
+python print_ready.py --spec ../spec/regen.json --out ../docs/print
+python pipeline.py --file ../docs/print/regen-spike-75.3mf --json ../out/release.json
+```
 
 ## Depths
 
