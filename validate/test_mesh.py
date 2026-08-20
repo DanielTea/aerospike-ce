@@ -43,12 +43,19 @@ def meshes(engine):
 # --------------------------------------------------------------------------
 
 def test_every_part_is_watertight(meshes):
-    """No boundary edges: an open shell is not a solid and will not slice."""
+    """
+    No boundary edges: an open shell is not a solid and will not slice.
+
+    Nor any triangle without area. Those pass every count here -- they have
+    three vertices and three edges like any other face -- and are what a slicer
+    reports as a missing surface.
+    """
     for name, (v, f) in meshes.items():
         rep = manifold_report(v, f)
         assert rep["watertight"], f"{name}: {rep}"
         assert rep["boundary_edges"] == 0, name
         assert rep["nonmanifold_edges"] == 0, name
+        assert rep["degenerate_faces"] == 0, f"{name}: {rep['degenerate_faces']} flat triangles"
 
 
 def test_topology_is_what_the_profile_implies(meshes, engine):

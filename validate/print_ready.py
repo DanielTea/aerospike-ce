@@ -225,7 +225,7 @@ def main() -> None:
         print(f"  {part:11s} {time.time() - t0:6.0f}s  {raw:9d} -> {len(f):8d} tris  "
               f"{rep['label']:10s} watertight {str(rep['watertight']):5s} "
               f"genus {rep['genus']:5d}  sealed {len(rep['sealed'])}  "
-              f"loose {len(rep['loose'])}  "
+              f"loose {len(rep['loose'])}  flat {rep['degenerate_faces']}  "
               f"{rep['volume_mm3'] / 1000:8.2f} cm3", flush=True)
 
     bad = []
@@ -236,6 +236,14 @@ def main() -> None:
             trapped = sum(abs(v) for v in r["sealed"]) / 1000.0
             bad.append(f"{part} has {len(r['sealed'])} sealed void(s) holding "
                        f"{trapped:.1f} cm3 of powder with no way out")
+        if r["degenerate_faces"]:
+            # Invisible to everything else here. A zero-area triangle is a
+            # perfectly ordinary face by index -- two neighbours per edge, so
+            # watertightness passes, genus passes, volume passes. A slicer has
+            # no normal to offset and no side to be inside of, and a plane of
+            # them is what Cura means by missing or extraneous surfaces.
+            bad.append(f"{part} has {r['degenerate_faces']} zero-area "
+                       f"triangle(s); a slicer will refuse it")
         if r["loose"]:
             adrift = sum(r["loose"]) / 1000.0
             bad.append(f"{part} is in {len(r['loose']) + 1} pieces: "

@@ -171,6 +171,7 @@ def main() -> None:
         gtxt = f"{g}" if want_g < 0 else f"{g} (expected {want_g}) {'ok' if g == want_g else 'MISMATCH'}"
         print(f"{part:11s} verify @{args.verify_voxel:.2f}mm {time.time() - t0:5.0f}s  "
               f"tris {len(f):8d}  watertight {str(rep['watertight']):5s}  "
+              f"flat tris {rep['degenerate_faces']:6d}  "
               f"comps {components(v, f):3d}  genus {gtxt}")
         print(f"{'':11s} volume {mv / 1000:8.2f} cm3 against {want / 1000:8.2f} expected "
               f"({solid / 1000:.2f} solid less features)  -> {err * 100:.2f}%")
@@ -183,7 +184,9 @@ def main() -> None:
         if args.decimate > 0.0 and want_g >= 0 and g == want_g:
             for keep in (0.03, 0.05, 0.08, 0.12, 0.20):
                 v2, f2 = decimate(v, f, keep)
-                if genus_of(v2, f2) == want_g and manifold_report(v2, f2)["watertight"]:
+                rep2 = manifold_report(v2, f2)
+                if genus_of(v2, f2) == want_g and rep2["watertight"] \
+                        and rep2["degenerate_faces"] == 0:
                     dv = abs(mesh_volume(v2, f2) - want) / abs(want)
                     write_binary_stl(path, v2, f2, f"{name}_{part}")
                     print(f"{'':11s} decimated to {len(f2):8d} tris at keep {keep:.2f}, "

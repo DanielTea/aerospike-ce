@@ -43,7 +43,7 @@ def main() -> int:
     bad, total_tris, total_mass = [], 0, 0.0
     print()
     print(f"  {'part':11s} {'triangles':>10s} {'watertight':>11s} {'genus':>7s} "
-          f"{'sealed':>7s} {'loose':>6s} {'volume cm3':>11s} {'mass kg':>8s}")
+          f"{'sealed':>7s} {'loose':>6s} {'flat':>7s} {'volume cm3':>11s} {'mass kg':>8s}")
     for name, (v, f) in parts.items():
         rep = manifold_report(v, f)
         surf = surfaces(v, f)
@@ -55,7 +55,8 @@ def main() -> int:
         total_tris += len(f)
         total_mass += mass
         print(f"  {name:11s} {len(f):10d} {str(rep['watertight']):>11s} {genus:7d} "
-              f"{len(sealed):7d} {len(loose):6d} {vol / 1000:11.2f} {mass:8.3f}")
+              f"{len(sealed):7d} {len(loose):6d} {rep['degenerate_faces']:7d} "
+              f"{vol / 1000:11.2f} {mass:8.3f}")
         if not rep["watertight"]:
             bad.append(f"{name}: {rep['boundary_edges']} boundary edges")
         if sealed:
@@ -66,6 +67,8 @@ def main() -> int:
             # test passes too. 27 cm3 of copper shipped attached to nothing.
             bad.append(f"{name}: in {len(loose) + 1} pieces, "
                        f"{sum(loose) / 1000:.1f} cm3 attached to nothing")
+        if rep["degenerate_faces"]:
+            bad.append(f"{name}: {rep['degenerate_faces']} zero-area triangles")
         if not np.isfinite(v).all():
             bad.append(f"{name}: non-finite vertex coordinates")
         if f.max() >= len(v):

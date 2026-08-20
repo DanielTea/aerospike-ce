@@ -1,3 +1,9 @@
 pytest>=8.0
 matplotlib>=3.8
 numpy>=1.26
+
+# mesh_solid.py and everything that meshes a distance field.
+# Without these, test_cooled_geometry, test_printability and test_shell do not
+# even collect.
+scipy>=1.11
+scikit-image>=0.22
