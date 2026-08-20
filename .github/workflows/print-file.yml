@@ -70,8 +70,15 @@ jobs:
 
       - name: gate
         working-directory: validate
-        run: python pipeline.py --file "$(ls ../docs/print/*.3mf | head -1)" \
-               --json ../out/release.json
+        # A literal block, not a folded one: YAML joins the lines of a plain
+        # scalar with a space, which leaves a backslash continuation sitting in
+        # the command as an escaped space. The first run of this job spent
+        # twenty-four minutes building the file and then handed argparse an
+        # argument called " --json ../out/release.json".
+        run: |
+          python pipeline.py \
+            --file "$(ls ../docs/print/*.3mf | head -1)" \
+            --json ../out/release.json
 
       - name: summary
         if: always()
