@@ -5,7 +5,7 @@ dimensioned in millimetres, with every cooling channel, injector orifice and
 mounting hole in it.
 
 **Download:** [regen-spike-75.3mf](https://github.com/DanielTea/aerospike-ce/releases/download/v0.1.0/regen-spike-75.3mf)
-(238 MiB, from the [v0.1.0 release](https://github.com/DanielTea/aerospike-ce/releases/tag/v0.1.0))
+(361 MiB, from the [v0.1.0 release](https://github.com/DanielTea/aerospike-ce/releases/tag/v0.1.0))
 
 It is a release asset rather than a file in the tree because it is 249 MB, and
 a generated artifact of that size does not belong in git history. The thing
@@ -31,27 +31,24 @@ watertight, no boundary or non-manifold edges, no cavity without a way out.
 
 | part | triangles | genus | volume | mass |
 |---|---|---|---|---|
-| centrebody | 8,205,076 | 328 | 402.9 cm3 | 3.53 kg |
-| cowl | 12,149,086 | 394 | 405.3 cm3 | 3.55 kg |
-| head | 1,487,276 | 101 | 1679.5 cm3 | 14.71 kg |
+| centrebody | 8,221,408 | 328 | 402.5 cm3 | 3.52 kg |
+| cowl | 20,360,540 | 393 | 392.8 cm3 | 3.44 kg |
+| head | 7,726,382 | 281 | 1574.6 cm3 | 13.79 kg |
 
-Genus is the check worth reading. The head's 101 is derived, not observed:
-one handle for the central bore, 48 for each plenum ring joined by its
-48 orifices, and four for the mounting holes. A single blind orifice would
-show up here as 100 -- while the part stayed watertight, drained, and looked
-entirely correct. The cowl's 394 and the centrebody's 328 track their 392 and
-164 channels.
+36,308,330 triangles, 20.75 kg, 378 MB. The equivalent binary STL would be
+1815 MB, and would not say what unit it was in.
 
-The head is two thirds of the engine's 21.8 kg because it is a 46 mm slab of
-copper, thickened to contain its manifolds. If mass matters, that is the first
-place to look, and it is a design change rather than a meshing one.
+The head is two thirds of the mass because it is a 46 mm slab of copper,
+thickened to contain its manifolds. If mass matters, that is the first place to
+look, and it is a design change rather than a meshing one.
 
-Decimation stops where the topology does. The channelled parts survive halving
-and not much more -- at 0.30 the quadric collapse closes a cooling channel --
-whereas the head goes to 15 percent. That is why the file is large: a
-regeneratively cooled engine at a resolution that actually holds its 556
-channels is tens of millions of triangles, and there is no honest way to make
-it small.
+Decimation stops where the topology does, and on this engine that is early. The
+centrebody survives halving; the head reaches 70 percent and the cowl only 85,
+because both now carry 1.2 mm transfer passages and a quadric collapse closes
+them before it closes anything else. Every step is checked and the result is
+the last one that survived, so the file is as large as the geometry honestly
+is: a regeneratively cooled engine at a resolution that holds its 556 cooling
+channels *and* its feed paths is tens of millions of triangles.
 
 ## Why 3MF and not STL
 

@@ -20,7 +20,7 @@ import sys
 import numpy as np
 
 from mesh_export import manifold_report, mesh_volume, read_3mf
-from print_ready import surfaces
+from print_ready import loose_pieces, surfaces
 
 
 def main() -> int:
@@ -43,22 +43,29 @@ def main() -> int:
     bad, total_tris, total_mass = [], 0, 0.0
     print()
     print(f"  {'part':11s} {'triangles':>10s} {'watertight':>11s} {'genus':>7s} "
-          f"{'sealed':>7s} {'volume cm3':>11s} {'mass kg':>8s}")
+          f"{'sealed':>7s} {'loose':>6s} {'volume cm3':>11s} {'mass kg':>8s}")
     for name, (v, f) in parts.items():
         rep = manifold_report(v, f)
         surf = surfaces(v, f)
         sealed = [vol for _, vol in surf if vol < 0.0]
+        loose = sorted((vol for _, vol in surf if vol > 0.0), reverse=True)[1:]
         vol = mesh_volume(v, f)
         genus = (2 * len(surf) - rep["euler"]) // 2
         mass = vol * 1e-9 * args.density
         total_tris += len(f)
         total_mass += mass
         print(f"  {name:11s} {len(f):10d} {str(rep['watertight']):>11s} {genus:7d} "
-              f"{len(sealed):7d} {vol / 1000:11.2f} {mass:8.3f}")
+              f"{len(sealed):7d} {len(loose):6d} {vol / 1000:11.2f} {mass:8.3f}")
         if not rep["watertight"]:
             bad.append(f"{name}: {rep['boundary_edges']} boundary edges")
         if sealed:
             bad.append(f"{name}: {len(sealed)} sealed void(s)")
+        if loose:
+            # The check that was missing. Both pieces are closed, so
+            # watertightness passes; the fragment is solid, so the sealed-void
+            # test passes too. 27 cm3 of copper shipped attached to nothing.
+            bad.append(f"{name}: in {len(loose) + 1} pieces, "
+                       f"{sum(loose) / 1000:.1f} cm3 attached to nothing")
         if not np.isfinite(v).all():
             bad.append(f"{name}: non-finite vertex coordinates")
         if f.max() >= len(v):
@@ -78,7 +85,8 @@ def main() -> int:
         for b in bad:
             print(f"    {b}")
         return 1
-    print("\n  OK: every solid closed, no cavity without a way out")
+    print("\n  OK: every solid closed and in one piece, "
+          "no cavity without a way out")
     return 0
 
 
