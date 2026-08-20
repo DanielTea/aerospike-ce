@@ -394,8 +394,8 @@ face by index -- two neighbours on every edge, so the edge arithmetic is content
 slicing stage is for.
 
 Marching cubes also places its vertices in single precision, in *index* units.
-Out at index 1024 that resolves about 6e-5 of an index, so a crossing a
-nanometre off a sample is placed exactly on it, and so is every other edge into
+Out at index 1024 that resolves about 6e-5 of an index, so a crossing a few
+nanometres off a sample is placed exactly on it, and so is every other edge into
 that sample; the weld then merges what the mesher meant to keep apart. The cowl
 did that once in 24 million triangles. `hold_off_level` keeps every sample a
 derived distance clear of the level, on the side it was already on, so no cell

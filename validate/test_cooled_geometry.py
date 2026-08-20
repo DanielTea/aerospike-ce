@@ -497,8 +497,9 @@ def test_a_sample_a_hair_off_the_level_does_not_collapse_the_vertex(index):
     four faces, no boundary anywhere, an odd Euler characteristic, nothing to
     see in a viewer. The cowl did it once in 24 million triangles.
 
-    The value here is the one measured at that pinch, five nanometres inside
-    the channel floor. Near the origin the same configuration is harmless,
+    The value here is the one measured at that pinch: 95 nanometres above the
+    channel floor, and so five below the level. Near the origin the same
+    configuration is harmless,
     which is the point: this is a precision failure, not a geometry failure,
     and it only bites far from the index origin.
     """

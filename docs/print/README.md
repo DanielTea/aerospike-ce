@@ -60,16 +60,34 @@ has several hundred cooling channels in it.
 
 ## What is checked before it is written
 
-`print_ready.py` refuses to write rather than writing something plausible:
+`print_ready.py` refuses to write rather than writing something plausible, and
+[`pipeline.py`](../pipeline/README.md) applies the same gates as its `watertight`
+and `slicing` stages:
 
 - **Watertight.** No boundary edges, no non-manifold edges.
 - **No sealed void.** Every internal cavity has a way out.
+- **One solid.** No second positive-volume surface -- no fragment attached to
+  nothing.
+- **Nothing a slicer refuses.** No zero-area triangle, no duplicated face, no
+  patch wound inside out, no vertex where the surface pinches against itself.
+  All four pass every check in the list above them: they are ordinary faces by
+  index, with two neighbours on every edge.
 - **Resolution.** The voxel is derived from the narrowest feature in the part,
   not chosen. Marching cubes needs about three samples across a feature.
+- **Volume.** The mesh and the field agree, by two different routes through the
+  same field -- the divergence theorem over the triangles against the occupancy
+  integrated cell by cell.
 - **Decimation that stops.** Quadric collapse reads a sub-millimetre channel as
   noise against a smooth wall and closes it, leaving a mesh that is still
   watertight and still looks like an engine. Every step is checked against the
   topology and the volume, and the result is the last one that survived.
+
+The slicing gates are there because the first published file did not have them.
+It carried 6,334 triangles with no area -- 0.017 percent of 36.3 million, and
+enough for a slicer to report missing surfaces -- through a build that reported
+every part watertight at the right genus. A zero-area triangle contributes no
+volume, breaks no edge pairing and changes no Euler characteristic; there was
+nothing in the gate that could see it.
 
 The sealed-void check is the one worth explaining. A part with internal cavities
 is not broken -- this head disc is one solid plus two plenum surfaces, and those

@@ -83,9 +83,10 @@ def hold_off_level(block: np.ndarray, voxel_mm: float,
     other edge into that sample lands there too. The weld then merges what
     marching cubes meant to keep apart, and the surface pinches: one edge shared
     by four faces, no boundary anywhere, an odd Euler characteristic, and
-    nothing whatsoever to see. The cowl did it once in 24 million triangles,
-    five nanometres from the channel floor, and sliding the lattice 0.08 mm made
-    it vanish -- which is how you tell arithmetic from geometry.
+    nothing whatsoever to see. The cowl did it once in 24 million triangles, at a
+    sample 95 nanometres above a channel floor and so five below the level being
+    meshed; sliding the lattice 0.08 mm made it vanish, which is how you tell
+    arithmetic from geometry.
 
     Pushed to the same side, so no cell changes classification and the topology
     is exactly what it was; the surface moves by at most the band, which is

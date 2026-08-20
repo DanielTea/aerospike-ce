@@ -12,9 +12,17 @@ name: pipeline
 
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
   workflow_dispatch:
+
+# A branch push and its pull request are the same commit; running the gate
+# twice on it proves nothing twice. Superseded runs are cancelled rather than
+# left to finish, because the answer they would give is about a commit nobody
+# is looking at any more.
+concurrency:
+  group: pipeline-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   verify:

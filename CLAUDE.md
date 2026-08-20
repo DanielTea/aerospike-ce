@@ -225,8 +225,9 @@ is placed exactly **on** the sample rather than beside it — and so is every
 other edge into that sample. The weld then merges what marching cubes meant to
 keep apart, and the surface pinches: one edge shared by four faces, no boundary
 anywhere, an odd Euler characteristic, nothing whatsoever to see. The cowl did
-it once in 24 million triangles, five nanometres inside a channel floor, and it
-took a lattice sweep to prove it was arithmetic rather than geometry — sliding
+it once in 24 million triangles, at a sample 95 nanometres above a channel
+floor and so five below the level being meshed, and it took a lattice sweep to
+prove it was arithmetic rather than geometry — sliding
 the grid 0.08 mm made it vanish.
 
 `hold_off_level` is the cure: no sample is allowed within a derived band of the
