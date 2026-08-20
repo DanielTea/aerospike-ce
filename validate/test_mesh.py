@@ -15,12 +15,16 @@ import pytest
 
 from engine_ref import assembly_from_spec
 from mesh_export import (
+    duplicate_faces,
     export_assembly,
+    inconsistent_edges,
     manifold_report,
     mesh_volume,
+    nonmanifold_vertices,
     read_binary_stl,
     revolve,
     simplify,
+    slicing_report,
     triangle_soup_volume,
 )
 
@@ -266,3 +270,98 @@ def test_3mf_states_millimetres(tmp_path):
     write_3mf(str(p), _two_parts())
     with zipfile.ZipFile(p) as z:
         assert 'unit="millimeter"' in z.read("3D/3dmodel.model").decode()
+
+
+# --------------------------------------------------------------------------
+# the gate a slicer applies
+# --------------------------------------------------------------------------
+
+def _cube():
+    """Unit cube, consistently wound outward. Every check here should pass it."""
+    v = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
+                  [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]], dtype=float)
+    f = np.array([[0, 3, 2], [0, 2, 1], [4, 5, 6], [4, 6, 7],
+                  [0, 1, 5], [0, 5, 4], [1, 2, 6], [1, 6, 5],
+                  [2, 3, 7], [2, 7, 6], [3, 0, 4], [3, 4, 7]])
+    return v, f
+
+
+def _tetrahedron(origin):
+    v = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float) \
+        + np.asarray(origin, dtype=float)
+    f = np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]])
+    return v, f
+
+
+def test_a_clean_solid_passes_every_slicing_check():
+    v, f = _cube()
+    rep = slicing_report(v, f)
+    assert rep["degenerate_faces"] == 0
+    assert rep["duplicate_faces"] == 0
+    assert rep["inconsistent_edges"] == 0
+    assert rep["nonmanifold_vertices"] == 0
+    assert rep["finite"] and rep["indices_in_range"] and rep["outward"]
+
+
+def test_a_pinched_vertex_survives_every_edge_count():
+    """
+    Two tetrahedra meeting at one point.
+
+    Every edge is still in exactly two triangles, so the mesh is watertight by
+    the only test that used to be applied to it. There is no edge to be
+    non-manifold: the defect is at a vertex, where the surface has two sides
+    and the slicer has to pick one.
+    """
+    v1, f1 = _tetrahedron([0, 0, 0])
+    v2, f2 = _tetrahedron([-1, 0, 0])                 # its vertex 1 lands on 0, 0, 0
+    v = np.concatenate([v1, np.delete(v2, 1, axis=0)])
+    f = np.concatenate([f1, np.array([[4, 0, 5, 6][i] for i in f2.ravel()]).reshape(-1, 3)])
+
+    rep = manifold_report(v, f)
+    assert rep["watertight"], "the pinch does not break a single edge pairing"
+    assert rep["nonmanifold_edges"] == 0
+    assert nonmanifold_vertices(f) == 1
+    # and the parity of the Euler characteristic is the free half of the same
+    # finding: two closed surfaces should sum to 4, not 3.
+    assert rep["euler"] % 2 == 1
+
+
+def test_a_flipped_triangle_closes_and_still_slices_wrong():
+    """
+    One face wound the other way. The mesh stays closed -- the edges are all
+    still shared by two triangles -- and three of them are now traversed twice
+    in the same direction, which is a patch of surface with its inside out.
+    """
+    v, f = _cube()
+    f[0] = f[0][::-1]
+    assert manifold_report(v, f)["watertight"]
+    assert inconsistent_edges(f) == 3
+
+
+def test_a_duplicated_face_is_named_as_one():
+    v, f = _cube()
+    doubled = np.concatenate([f, f[:1]])
+    assert duplicate_faces(doubled) == 1
+    assert duplicate_faces(f) == 0
+
+
+def test_a_zero_area_triangle_is_counted_not_ignored():
+    v, f = _cube()
+    v = np.concatenate([v, [[0.5, 0.0, 0.0]]])        # collinear with edge 0-1
+    f = np.concatenate([f, [[0, 1, 8]]])
+    assert slicing_report(v, f)["degenerate_faces"] == 1
+
+
+def test_an_inside_out_solid_is_refused():
+    v, f = _cube()
+    assert slicing_report(v, f[:, ::-1].copy())["outward"] is False
+
+
+def test_every_revolved_part_passes_the_slicing_gate(meshes):
+    for name, (v, f) in meshes.items():
+        rep = slicing_report(v, f)
+        assert rep["degenerate_faces"] == 0, name
+        assert rep["duplicate_faces"] == 0, name
+        assert rep["inconsistent_edges"] == 0, name
+        assert rep["nonmanifold_vertices"] == 0, name
+        assert rep["outward"], name

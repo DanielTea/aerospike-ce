@@ -8,6 +8,10 @@ leaves the writer itself unchecked, which is the part a slicer actually sees: a
 dropped triangle, an off-by-one vertex index or a unit tag that says inches all
 produce a file that opens cleanly and is not the part.
 
+Every gate is re-derived here, including the ones that only a slicer would
+notice: a zero-area triangle, a duplicated face, a patch wound inside out, and
+a vertex where the surface pinches against itself.
+
 So this reopens the file as a stranger would, and re-derives every property from
 what is on disk rather than from what was meant.
 """
@@ -19,7 +23,7 @@ import sys
 
 import numpy as np
 
-from mesh_export import manifold_report, mesh_volume, read_3mf
+from mesh_export import manifold_report, mesh_volume, read_3mf, slicing_report
 from print_ready import loose_pieces, surfaces
 
 
@@ -43,9 +47,11 @@ def main() -> int:
     bad, total_tris, total_mass = [], 0, 0.0
     print()
     print(f"  {'part':11s} {'triangles':>10s} {'watertight':>11s} {'genus':>7s} "
-          f"{'sealed':>7s} {'loose':>6s} {'flat':>7s} {'volume cm3':>11s} {'mass kg':>8s}")
+          f"{'sealed':>7s} {'loose':>6s} {'flat':>6s} {'pinch':>6s} {'wound':>6s} "
+          f"{'volume cm3':>11s} {'mass kg':>8s}")
     for name, (v, f) in parts.items():
         rep = manifold_report(v, f)
+        rep.update(slicing_report(v, f))
         surf = surfaces(v, f)
         sealed = [vol for _, vol in surf if vol < 0.0]
         loose = sorted((vol for _, vol in surf if vol > 0.0), reverse=True)[1:]
@@ -55,7 +61,8 @@ def main() -> int:
         total_tris += len(f)
         total_mass += mass
         print(f"  {name:11s} {len(f):10d} {str(rep['watertight']):>11s} {genus:7d} "
-              f"{len(sealed):7d} {len(loose):6d} {rep['degenerate_faces']:7d} "
+              f"{len(sealed):7d} {len(loose):6d} {rep['degenerate_faces']:6d} "
+              f"{rep['nonmanifold_vertices']:6d} {rep['inconsistent_edges']:6d} "
               f"{vol / 1000:11.2f} {mass:8.3f}")
         if not rep["watertight"]:
             bad.append(f"{name}: {rep['boundary_edges']} boundary edges")
@@ -69,9 +76,18 @@ def main() -> int:
                        f"{sum(loose) / 1000:.1f} cm3 attached to nothing")
         if rep["degenerate_faces"]:
             bad.append(f"{name}: {rep['degenerate_faces']} zero-area triangles")
-        if not np.isfinite(v).all():
+        if rep["nonmanifold_vertices"]:
+            bad.append(f"{name}: pinches at {rep['nonmanifold_vertices']} vertices")
+        if rep["duplicate_faces"]:
+            bad.append(f"{name}: {rep['duplicate_faces']} duplicated triangles")
+        if rep["inconsistent_edges"]:
+            bad.append(f"{name}: {rep['inconsistent_edges']} edges wound the same "
+                       f"way by both their triangles")
+        if not rep["outward"]:
+            bad.append(f"{name}: encloses negative volume, the solid is inside out")
+        if not rep["finite"]:
             bad.append(f"{name}: non-finite vertex coordinates")
-        if f.max() >= len(v):
+        if not rep["indices_in_range"]:
             bad.append(f"{name}: triangle references vertex {f.max()} of {len(v)}")
 
     lo = np.min([v.min(axis=0) for v, _ in parts.values()], axis=0)
@@ -88,8 +104,8 @@ def main() -> int:
         for b in bad:
             print(f"    {b}")
         return 1
-    print("\n  OK: every solid closed and in one piece, "
-          "no cavity without a way out")
+    print("\n  OK: every solid closed, in one piece and consistently wound, "
+          "no cavity without a way out, nothing a slicer will refuse")
     return 0
 
 

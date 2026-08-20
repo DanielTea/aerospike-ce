@@ -8,6 +8,8 @@ asserting it. Every part written here is:
 
 - watertight, with no boundary and no non-manifold edges
 - a single connected solid, not a shell that happens to look like one
+- free of the defects a slicer sees and a topologist does not: zero-area
+  triangles, duplicated faces, a patch wound inside out, a pinch point
 - within tolerance of the distance field it came from, by volume
 - meshed fine enough to resolve its own narrowest feature
 
@@ -52,7 +54,7 @@ from scipy.sparse.csgraph import connected_components
 from build_plan import build_plan, narrowest_feature
 from engine_design import design_engine
 from manifold_ref import design_manifolds, geometry_features
-from mesh_export import manifold_report, mesh_volume, write_3mf
+from mesh_export import manifold_report, mesh_volume, slicing_report, write_3mf
 from mesh_solid import (
     _weld,
     build_mesh_streaming,
@@ -117,8 +119,9 @@ def sealed_voids(verts: np.ndarray, faces: np.ndarray) -> list:
     return [v for _, v in surfaces(verts, faces) if v < 0.0]
 
 
-def check(verts, faces, label: str) -> dict:
+def check(verts, faces, label: str, deep: bool = False) -> dict:
     rep = manifold_report(verts, faces)
+    rep.update(slicing_report(verts, faces, deep=deep))
     surf = surfaces(verts, faces)
     rep["surfaces"] = len(surf)
     rep["sealed"] = [v for _, v in surf if v < 0.0]
@@ -187,6 +190,15 @@ def reduce_safely(verts, faces, target_ratio: float, tol_volume: float = 0.02):
         # something a weld cannot undo and the step is not safe to take.
         if rep["degenerate_faces"] > base["degenerate_faces"]:
             break
+        # A collapse can also duplicate a face onto its neighbour or flip one
+        # against it. Both keep every edge in two triangles, so the watertight
+        # test above passes them, and both are a surface a slicer reads the
+        # wrong way round. The fan count is left to the deep check on the
+        # finished part: a new pinch moves the genus, which is the next line.
+        if rep["duplicate_faces"] > base["duplicate_faces"]:
+            break
+        if rep["inconsistent_edges"] > base["inconsistent_edges"]:
+            break
         if rep["genus"] != base["genus"]:
             break
         if abs(rep["volume_mm3"] - base["volume_mm3"]) > tol_volume * abs(base["volume_mm3"]):
@@ -247,12 +259,16 @@ def main() -> None:
                                     **features_for(design, part))
         raw = len(f)
         v, f, rep = reduce_safely(v, f, args.keep)
+        # The ladder runs on the cheap checks; the part that actually gets
+        # written is asked the expensive question once, here.
+        rep = check(v, f, rep["label"], deep=True)
         parts[part] = (v, f)
         reports.append((part, raw, rep, time.time() - t0))
         print(f"  {part:11s} {time.time() - t0:6.0f}s  {raw:9d} -> {len(f):8d} tris  "
               f"{rep['label']:10s} watertight {str(rep['watertight']):5s} "
               f"genus {rep['genus']:5d}  sealed {len(rep['sealed'])}  "
               f"loose {len(rep['loose'])}  flat {rep['degenerate_faces']}  "
+              f"pinch {rep['nonmanifold_vertices']}  "
               f"{rep['volume_mm3'] / 1000:8.2f} cm3", flush=True)
 
     bad = []
@@ -275,6 +291,22 @@ def main() -> None:
             adrift = sum(r["loose"]) / 1000.0
             bad.append(f"{part} is in {len(r['loose']) + 1} pieces: "
                        f"{adrift:.1f} cm3 of metal is attached to nothing")
+        if r["nonmanifold_vertices"]:
+            # The surface touching itself at a point. Every edge is still in
+            # two triangles so watertightness passes, and the slicer has two
+            # answers for what is inside there.
+            bad.append(f"{part} pinches at {r['nonmanifold_vertices']} "
+                       f"vertex/vertices; the surface meets itself")
+        if r["duplicate_faces"]:
+            bad.append(f"{part} has {r['duplicate_faces']} duplicated triangle(s)")
+        if r["inconsistent_edges"]:
+            bad.append(f"{part} has {r['inconsistent_edges']} edge(s) whose two "
+                       f"triangles are wound the same way; a patch is inside out")
+        if not r["outward"]:
+            bad.append(f"{part} encloses negative volume: the solid is inside out")
+        if not r["finite"] or not r["indices_in_range"]:
+            bad.append(f"{part} has non-finite coordinates or a triangle "
+                       f"referencing a vertex that is not there")
     if bad:
         raise SystemExit("refusing to write a print file:\n  " + "\n  ".join(bad))
 

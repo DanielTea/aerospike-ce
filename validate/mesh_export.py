@@ -26,6 +26,8 @@ import os
 import struct
 
 import numpy as np
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
 
 from engine_ref import EngineAssembly, Profile
 
@@ -194,6 +196,126 @@ def manifold_report(v: np.ndarray, f: np.ndarray) -> dict:
 def _face_areas(v: np.ndarray, f: np.ndarray) -> np.ndarray:
     a, b, c = v[f[:, 0]], v[f[:, 1]], v[f[:, 2]]
     return 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)
+
+
+# --------------------------------------------------------------------------
+# what a slicer needs that the edge arithmetic does not see
+# --------------------------------------------------------------------------
+
+def duplicate_faces(f: np.ndarray) -> int:
+    """
+    Triangles occupying the same three vertices as another triangle.
+
+    Two coincident faces keep every edge count at two, so watertightness is
+    happy. A slicer walking the surface arrives at the same place twice and
+    disagrees with itself about which side is solid.
+    """
+    key = np.sort(f, axis=1)
+    _, counts = np.unique(key, axis=0, return_counts=True)
+    return int(np.sum(counts) - len(counts))
+
+
+def inconsistent_edges(f: np.ndarray) -> int:
+    """
+    Interior edges not traversed once in each direction.
+
+    On a consistently wound closed surface every edge is shared by two
+    triangles that walk it in opposite directions. Where two neighbours agree
+    on the direction instead, one of them has its normal flipped: locally the
+    mesh still closes, and the slicer reads solid and void the wrong way round
+    across that patch.
+    """
+    n = int(f.max()) + 1 if len(f) else 1
+    tail = f.reshape(-1)
+    head = f[:, [1, 2, 0]].reshape(-1)
+    lo = np.minimum(tail, head).astype(np.int64)
+    hi = np.maximum(tail, head).astype(np.int64)
+    key = lo * n + hi
+    uniq, inverse, counts = np.unique(key, return_inverse=True, return_counts=True)
+    forward = np.bincount(inverse, weights=(tail < head).astype(np.float64),
+                          minlength=len(uniq))
+    interior = counts == 2
+    return int(np.sum(interior & (forward != 1.0)))
+
+
+def nonmanifold_vertices(f: np.ndarray) -> int:
+    """
+    Vertices where the surface pinches: two cones meeting at a single point.
+
+    Every edge is still in exactly two triangles, so `manifold_report` passes
+    it, and the Euler characteristic only betrays it when the number of extra
+    fans is odd. A slicer that has to decide what is inside at that point has
+    two answers.
+
+    Counted by fans rather than by vertices. Around a manifold vertex the
+    incident triangles form one closed ring; around a pinch they form two or
+    more. The triangle corners are the nodes and each shared edge joins the
+    two corners that sit on it, so the number of connected components is the
+    number of fans, and anything above one vertex apiece is a pinch.
+    """
+    if not len(f):
+        return 0
+    n = int(f.max()) + 1
+    n_he = 3 * len(f)
+    tail = f.reshape(-1)
+    head = f[:, [1, 2, 0]].reshape(-1)
+    corner_tail = np.arange(n_he, dtype=np.int64)
+    corner_head = np.arange(n_he, dtype=np.int64).reshape(-1, 3)[:, [1, 2, 0]].reshape(-1)
+
+    lo = np.minimum(tail, head).astype(np.int64)
+    hi = np.maximum(tail, head).astype(np.int64)
+    order = np.argsort(lo * n + hi, kind="stable")
+    key = (lo * n + hi)[order]
+    # consecutive half-edges sharing a key are the pair on that edge; anything
+    # shared by more or fewer than two faces is a manifold failure the edge
+    # count already reports, so it is left alone here.
+    pair = np.flatnonzero((key[:-1] == key[1:]) &
+                          np.concatenate(([True], key[:-1] != key[1:]))[:-1] &
+                          np.concatenate((key[1:] != key[:-1], [True]))[1:])
+    a, b = order[pair], order[pair + 1]
+
+    same = tail[a] == tail[b]
+    rows = np.concatenate([
+        corner_tail[a], np.where(same, corner_tail[b], corner_head[b]),
+        corner_head[a], np.where(same, corner_head[b], corner_tail[b]),
+    ])
+    cols = np.concatenate([
+        np.where(same, corner_tail[b], corner_head[b]), corner_tail[a],
+        np.where(same, corner_head[b], corner_tail[b]), corner_head[a],
+    ])
+    g = coo_matrix((np.ones(len(rows), dtype=np.int8), (rows, cols)),
+                   shape=(n_he, n_he))
+    fans, _ = connected_components(g, directed=False)
+    return int(fans - len(np.unique(f)))
+
+
+def slicing_report(v: np.ndarray, f: np.ndarray, deep: bool = True) -> dict:
+    """
+    The gate a slicer applies, which is not the gate a topologist applies.
+
+    Everything here passes `manifold_report`. A zero-area triangle has two
+    neighbours per edge; a duplicated face keeps every count at two; a flipped
+    patch closes perfectly; a pinch point shares no edge with itself. All four
+    produce a file that opens in a viewer, looks like the part, and slices into
+    something that is not it.
+
+    `deep` turns on the fan count, which is the only expensive one here: it
+    walks a graph over every triangle corner and costs a few gigabytes on a
+    twenty-million-triangle part. Left off inside a decimation ladder, where
+    the genus comparison already catches a new pinch, and turned on once per
+    part before anything is written.
+    """
+    areas = _face_areas(v, f)
+    return {
+        "degenerate_faces": int(np.sum(areas <= 0.0)),
+        "duplicate_faces": duplicate_faces(f),
+        "inconsistent_edges": inconsistent_edges(f),
+        "nonmanifold_vertices": nonmanifold_vertices(f) if deep else 0,
+        "min_face_area_mm2": float(areas.min()) if len(areas) else 0.0,
+        "finite": bool(np.isfinite(v).all()),
+        "indices_in_range": bool(len(f) == 0 or int(f.max()) < len(v)),
+        "outward": bool(mesh_volume(v, f) > 0.0),
+    }
 
 
 # --------------------------------------------------------------------------
