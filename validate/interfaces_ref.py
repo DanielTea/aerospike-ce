@@ -329,9 +329,23 @@ def build_schedule(design) -> InterfaceSchedule:
     split = design.coolant_split
     v_line = 8.0
 
-    # cowl jacket, fed radially through the outer skin near the throat
-    x_cowl = float(a.outer_wall_x[-1]) - 6.0
-    r_cowl = float(max(a.cowl_outer_r)) + 1.0
+    # cowl jacket, fed radially through the outer skin near the throat.
+    #
+    # Taken from the inlet ring itself. Composed instead from the aft end of
+    # the wall and the largest radius anywhere on it -- two unrelated stations
+    # -- this reported a fitting at x -1.6, r 101.8: twenty-five millimetres
+    # downstream of the manifold it feeds, and nineteen millimetres out in mid
+    # air, because the cowl has tapered to r 82 by then.
+    from manifold_ref import design_manifolds
+    _md = design_manifolds(design)
+    _ring = next((q for q in _md.plenums if q.name == "cowl_inlet_ring"), None)
+    if _ring is not None:
+        x_cowl = _ring.x_mm
+        r_cowl = (_ring.r_inner_mm + 2.0 * _ring.half_r_mm
+                  + a.structure.wall_thickness_mm)
+    else:
+        x_cowl = float(a.outer_wall_x[-1]) - 6.0
+        r_cowl = float(max(a.cowl_outer_r)) + 1.0
     mdot_cowl = ch.mass_flow_fuel * split.get("cowl", 0.5)
     ports.append(Port(
         name="fuel_in_cowl", kind="inlet", fluid="fuel",
@@ -363,18 +377,31 @@ def build_schedule(design) -> InterfaceSchedule:
     # Split across as many bosses as the face has room for. One port carrying
     # the whole flow needs an 18 mm bore and there is nowhere on an annular head
     # to put one without driving it through an orifice ring.
-    n_ox, bore_ox, r_ox_boss = _split_inlet(
-        design, a, ch.mass_flow_ox, prop.density_ox, v_line)
+    # Radially into the dome through the rim, not axially into the end face.
+    # The dome sits outboard, so an axial bore on the end face at a radius
+    # clear of the orifice rings misses it entirely and carries on into the
+    # injector; there was no oxidiser inlet in the geometry at all.
+    _dome = next((q for q in _md.plenums if q.name == "ox_dome"), None)
     t_ox = 90.0 if prop.oxidiser == "LOX" else 290.0
+    if _dome is not None:
+        # Six bores rather than one, because a radial hole is a bridge over its
+        # own width and an 18 mm span is past what the process will hold up.
+        n_ox, bore_ox = 6, 8.0
+        x_ox, r_ox_boss, orient_ox = _dome.x_mm, a.flange_radius, "radial"
+        v_ox = velocity_in_bore(ch.mass_flow_ox / n_ox, prop.density_ox, bore_ox)
+    else:
+        n_ox, bore_ox, r_ox_boss = _split_inlet(
+            design, a, ch.mass_flow_ox, prop.density_ox, v_line)
+        x_ox, orient_ox, v_ox = x_head_face, "axial", v_line
     for i in range(n_ox):
         ports.append(Port(
             name="ox_in" if n_ox == 1 else f"ox_in_{i + 1}",
             kind="inlet", fluid="oxidiser",
-            x_mm=x_head_face, r_mm=r_ox_boss,
-            theta_deg=(180.0 + i * 360.0 / n_ox) % 360.0,
-            orientation="axial",
+            x_mm=x_ox, r_mm=r_ox_boss,
+            theta_deg=(15.0 + i * 360.0 / n_ox) % 360.0,
+            orientation=orient_ox,
             bore_mm=bore_ox, boss_od_mm=bore_ox + 6.0,
-            mass_flow=ch.mass_flow_ox / n_ox, velocity=v_line,
+            mass_flow=ch.mass_flow_ox / n_ox, velocity=v_ox,
             pressure_bar=feed_bar, temperature_k=t_ox,
             connect_to=(f"{prop.oxidiser} supply"
                         + (f", leg {i + 1} of {n_ox}" if n_ox > 1 else "")

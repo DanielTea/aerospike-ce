@@ -133,7 +133,7 @@ def test_decimation_walks_from_mild_to_aggressive(monkeypatch):
     print_ready.reduce_safely(v, f, target_ratio=0.12)
 
     assert tried == sorted(tried, reverse=True), "ladder is not mildest-first"
-    assert tried[0] == 0.5
+    assert tried[0] == 0.85
     assert min(tried) == 0.12, "ladder went past the requested target"
 
 
@@ -162,3 +162,29 @@ def test_decimation_keeps_the_last_mesh_that_passed(monkeypatch):
     assert len(out) < len(f), "kept the original when 0.5 and 0.3 both worked"
     assert rep["watertight"], "returned the mesh that failed the check"
     assert len(out) > len(f) // 4, "accepted a step past the one that broke"
+
+
+def test_a_loose_fragment_is_not_mistaken_for_a_part():
+    """
+    Two solids, both closed, neither hollow. Watertightness passes and the
+    sealed-void test passes, because the fragment is metal rather than a
+    cavity -- so this needed its own check, and did not have one. A 27 cm3
+    ring of copper attached to nothing shipped inside the cowl.
+    """
+    from print_ready import loose_pieces
+
+    X, Y, Z = _grid()
+    a = np.sqrt((X - 6.0) ** 2 + Y ** 2 + Z ** 2) - 5.0
+    b = np.sqrt((X + 7.0) ** 2 + Y ** 2 + Z ** 2) - 2.5
+    v, f = _mesh(np.minimum(a, b))
+
+    loose = loose_pieces(v, f)
+    assert len(loose) == 1
+    assert loose[0] == pytest.approx(4.0 / 3.0 * np.pi * 2.5 ** 3, rel=0.06)
+    assert sealed_voids(v, f) == [], "a second solid is not a cavity"
+
+
+def test_one_solid_leaves_nothing_loose():
+    v, f = _mesh(_radius() - 8.0)
+    from print_ready import loose_pieces
+    assert loose_pieces(v, f) == []

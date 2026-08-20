@@ -85,6 +85,24 @@ def surfaces(verts: np.ndarray, faces: np.ndarray):
     return out
 
 
+def loose_pieces(verts: np.ndarray, faces: np.ndarray) -> list:
+    """
+    Solids that are not the part, by their positive volume.
+
+    A part is one solid plus however many cavity surfaces it has. A *second*
+    positive-volume surface is a piece of metal connected to nothing: it falls
+    out of the powder at depowdering, or worse, does not, and rattles around
+    inside a cooling jacket.
+
+    This is the check that was missing. Watertightness does not see it -- both
+    pieces are closed -- and neither does the sealed-void test, because the
+    fragment is solid rather than hollow. A 27 cm3 ring of copper shipped
+    inside the cowl of a print file that passed every gate it was given.
+    """
+    vols = sorted((v for _, v in surfaces(verts, faces) if v > 0.0), reverse=True)
+    return vols[1:]
+
+
 def sealed_voids(verts: np.ndarray, faces: np.ndarray) -> list:
     """
     Enclosed cavities with no way out, by their negative signed volume.
@@ -103,6 +121,7 @@ def check(verts, faces, label: str) -> dict:
     surf = surfaces(verts, faces)
     rep["surfaces"] = len(surf)
     rep["sealed"] = [v for _, v in surf if v < 0.0]
+    rep["loose"] = sorted((v for _, v in surf if v > 0.0), reverse=True)[1:]
     rep["genus"] = (2 * len(surf) - rep["euler"]) // 2
     rep["volume_mm3"] = mesh_volume(verts, faces)
     rep["label"] = label
@@ -128,7 +147,13 @@ def reduce_safely(verts, faces, target_ratio: float, tol_volume: float = 0.02):
     # parts stop. The centrebody survives 0.50 and not 0.30; with only
     # those two rungs the 0.40 that it would also have taken is never
     # tried, and a fifth of the file is carried for nothing.
-    for ratio in (0.5, 0.4, 0.35, 0.3, 0.25, 0.2, 0.15, 0.12, 0.08, 0.05):
+    # Starts at 0.85, not 0.5. The head and the cowl both carry 1.2 mm
+    # passages now, and halving the triangle count closes them -- so with
+    # 0.5 as the mildest rung the guard correctly refused, and both parts
+    # shipped every one of their triangles. A ladder is only as good as
+    # its gentlest step.
+    for ratio in (0.85, 0.7, 0.6, 0.5, 0.4, 0.35, 0.3, 0.25,
+                  0.2, 0.15, 0.12, 0.08, 0.05):
         if ratio < target_ratio:
             continue
         v2, f2 = decimate(verts, faces, ratio)
@@ -158,6 +183,7 @@ def features_for(design, part):
     # plenums ended up. Generating them here as well would put a second,
     # differently-placed set of orifices in the same disc.
     hl = list(gf.get(part, {}).get("holes", []))
+    pt = list(pt) + list(gf.get(part, {}).get("ports", []))
     return dict(channels=ch, ports=pt, holes=hl,
                 bosses=gf.get(part, {}).get("bosses"),
                 lugs=gf.get(part, {}).get("lugs"),
@@ -198,7 +224,8 @@ def main() -> None:
         reports.append((part, raw, rep, time.time() - t0))
         print(f"  {part:11s} {time.time() - t0:6.0f}s  {raw:9d} -> {len(f):8d} tris  "
               f"{rep['label']:10s} watertight {str(rep['watertight']):5s} "
-              f"genus {rep['genus']:5d}  sealed voids {len(rep['sealed'])}  "
+              f"genus {rep['genus']:5d}  sealed {len(rep['sealed'])}  "
+              f"loose {len(rep['loose'])}  "
               f"{rep['volume_mm3'] / 1000:8.2f} cm3", flush=True)
 
     bad = []
@@ -209,6 +236,10 @@ def main() -> None:
             trapped = sum(abs(v) for v in r["sealed"]) / 1000.0
             bad.append(f"{part} has {len(r['sealed'])} sealed void(s) holding "
                        f"{trapped:.1f} cm3 of powder with no way out")
+        if r["loose"]:
+            adrift = sum(r["loose"]) / 1000.0
+            bad.append(f"{part} is in {len(r['loose']) + 1} pieces: "
+                       f"{adrift:.1f} cm3 of metal is attached to nothing")
     if bad:
         raise SystemExit("refusing to write a print file:\n  " + "\n  ".join(bad))
 

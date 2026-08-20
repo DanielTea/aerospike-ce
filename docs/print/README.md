@@ -108,45 +108,87 @@ and it is why `cooling.min_channel_width_mm` is pinned in the spec rather than
 left to the search, which would take 0.4 mm and a 0.133 mm voxel for the whole
 engine.
 
-## The head manifolds, and what is wrong with them
+## The feed paths
 
-Worth stating plainly, because it is the weakest part of this engine and it is
-not visible in the geometry.
+Worth reading before you connect anything, because the routing is not obvious
+and an earlier version of this model got it comprehensively wrong.
 
-The injector's two orifice rings sit 7 mm apart radially -- that spacing is set
-by the impingement geometry, not chosen -- and each needs its own manifold
-behind it. Two manifolds 7 mm apart, with a 3 mm wall between them, leaves each
-one 4 mm wide. Buying the flow area back in depth gives a 40 mm deep, 4 mm wide
-slot, and even then:
+The fuel does two jobs in series, which is what "regenerative" means:
 
-| manifold | section | velocity | its orifices |
-|---|---|---|---|
-| fuel | 40 x 4.0 mm | 14.6 m/s | 36.5 m/s |
-| oxidiser | 40 x 4.0 mm | 13.0 m/s | 22.2 m/s |
+```
+fuel  -> cowl jacket   -.
+                         >- head fuel manifold -> 48 fuel orifices
+fuel  -> bore -> spike -'
 
-A feed manifold wants to be slow compared with the orifices it feeds, because
-the dynamic pressure it does not recover shows up as a variation in orifice
-pressure drop around the ring. At 13 m/s against 22 the oxidiser ring is at
-about a third of orifice dynamic pressure, which is poor distribution. The model
-reports the velocity the geometry actually has rather than the 4 m/s it was
-asked for, and says why.
+ox    -> ox dome -> 48 radial ports -> 48 oxidiser orifices
+```
 
-The real fix is not a bigger manifold, because there is nowhere to put one. It
-is coaxial posts -- the oxidiser dome sitting behind the fuel manifold with the
-ox orifices running through it in tubes -- which is what production engines do
-and what this model does not yet have the geometry for.
+There is no coolant outlet. The fuel *is* the coolant; it leaves both jackets
+into the injector manifold and is burned. A port taking it out of the engine
+would throw away the propellant along with the heat.
 
-Two things that had to be got right first, and were not:
+| inlet | where | flow |
+|---|---|---|
+| fuel, cowl jacket | radial boss, x = −26.4, r = 118 | 414 g/s, 37.5 bar, 111 K, AN-8 |
+| fuel, spike jacket | axial on the axis, x = −203 | 553 g/s, 37.5 bar, 111 K, AN-10 |
+| oxidiser | 6 radial bores through the rim, x = −168.6, r = 122.8 | 6 × 387 g/s, 37.5 bar, 90 K, AN-6 |
 
-- The manifolds were originally packed outward from the bore to make them fit
-  the disc, which put the oxidiser dome at r 98-117 mm while its own orifices
-  sat at r 88. The dome fed nothing, and the orifices pointed at the radius the
-  *fuel* manifold occupies. A few millimetres more reach and the engine would
-  have plumbed oxidiser into the fuel manifold. Both parts are watertight either
-  way; only the sealed-void check noticed, as 325 cm3 of trapped powder.
-- The section is a diamond, so how far aft it reaches depends on the radius at
-  which you meet it. Reading the extreme tip as though it applied everywhere put
-  the orifices 5 mm short of it.
+The oxidiser goes in through the rim rather than the end face because the dome
+sits outboard: an axial bore on the end face at a radius clear of the orifice
+rings misses the dome entirely and runs on into the injector.
+
+### Why the head is laid out the way it is
+
+The injector's two orifice rings are 7 mm apart radially — set by the
+impingement geometry, not chosen. Two manifolds each straddling its own ring,
+with a wall between them, leaves each one 4 mm wide, which forces them 40 mm
+deep to carry the flow, which fills the disc and leaves nowhere for the
+passages that feed them. That arrangement ran at 13–15 m/s and distributed
+badly.
+
+So only the fuel manifold straddles its ring. The oxidiser dome sits outboard
+and reaches its ring through a ring of 48 radial ports — a coaxial post, built
+from the primitives this model already has. Both are then wide and shallow:
+
+| plenum | section | velocity |
+|---|---|---|
+| fuel manifold | 21.8 × 13.1 mm, r 71–84 | 8.0 m/s |
+| ox dome | 17.1 × 17.1 mm, r 103–120 | 7.0 m/s |
+
+against 36.5 and 22.2 m/s at the orifices, which is the ratio that governs how
+evenly a ring distributes.
+
+The cowl's coolant arrives at r 99 and has to reach r 78. It cannot cross the
+dome — a plenum is a continuous ring, so anything inside its radial band goes
+through it, and fuel crossing the oxidiser dome is the one failure this layout
+exists to prevent. It runs axially down the corridor inboard of the dome, then
+turns in through the one window where the manifold has begun and the dome has
+not. The spike's coolant arrives close to the bore, where the manifold already
+reaches, so it goes straight in.
+
+Each jacket has a groove across its joint face collecting all of its channels,
+so no channel dead-ends against a head that only has holes in 48 places.
+
+### What was wrong before
+
+Four defects, each of which produced a part that was watertight, drained, and
+looked entirely correct:
+
+- The oxidiser dome was packed outward from the bore to make it fit the disc,
+  landing at r 98–117 while its own orifices sat at r 88. The dome fed nothing,
+  and the orifices pointed at the radius the *fuel* manifold occupies.
+- Orifice depth was read off the diamond section's extreme tip as though it
+  applied at every radius. It does not, and the holes stopped 5 mm short.
+- The port schedule named three inlets and the geometry cut none of them.
+- The cowl's inlet ring was seated on where its feed ports *end* rather than on
+  where the metal is, so it landed 2.1 mm proud of a tapering surface. Its boss
+  touched the cowl only at the forward edge, and hollowing the plenum inside it
+  cut that last connection — leaving 27 cm3 of copper attached to nothing,
+  inside a part that passed every gate it was given.
+
+The last one is why `print_ready.py` now refuses a part in more than one piece.
+Watertightness cannot see it: both pieces are closed. The sealed-void check
+cannot see it either, because a loose fragment is solid rather than hollow.
 
 ## What this is not
 

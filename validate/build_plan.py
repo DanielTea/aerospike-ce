@@ -144,6 +144,11 @@ def build_plan(spec: dict, design=None) -> dict:
                 "r_outer_mm": _f(lg.r_outer),
                 "half_width_deg": _f(lg.half_width_deg),
                 "phase_rad": _f(lg.phase)})
+        for q in feats.get("ports", []):
+            plan["parts"][part]["ports"].append({
+                "x_mm": _f(q.x_at), "diameter_mm": _f(q.diameter_mm),
+                "count": int(q.count), "r_lo_mm": _f(q.r_lo),
+                "r_hi_mm": _f(q.r_hi), "phase_rad": _f(q.phase)})
         for h in feats.get("holes", []):
             plan["parts"][part]["holes"].append({
                 "radius_mm": _f(h.radius_mm), "diameter_mm": _f(h.diameter_mm),

@@ -255,9 +255,15 @@ def size_mount_lugs(
 
 
 def design_manifolds(design, velocity: float = 4.0, aspect: float = 1.2,
-                     lug_count: int = 4) -> ManifoldDesign:
+                     lug_count: int = 4, head_velocity: float = 8.0) -> ManifoldDesign:
     """
     Every plenum and mount the engine needs, derived from the solved design.
+
+    `head_velocity` is separate from `velocity` because the head plenums are
+    depth-limited by the disc rather than area-limited by anything physical: at
+    4 m/s the fuel manifold wants to be 44 mm deep in a 46 mm disc, leaving
+    nowhere for the passages that feed it. 8 m/s is still slow against the
+    36 m/s the orifices run at, which is what governs distribution.
     """
     from mesh_solid import centrebody_channels, cowl_channels, feed_ports
 
@@ -272,8 +278,14 @@ def design_manifolds(design, velocity: float = 4.0, aspect: float = 1.2,
     if design.circuits.get("cowl"):
         cut = cowl_channels(a, design.circuits["cowl"].channel)
         port = feed_ports(a, cut)
+        # The skin the ring sits on, read off the wall at that station. Taken
+        # from the feed port's outer reach instead -- which is where the port
+        # ends, not where the metal is -- the ring lands 2.1 mm proud of a
+        # surface that has already begun to taper, its boss touches the cowl
+        # only at the forward edge, and hollowing the plenum inside it cuts
+        # that last connection: 27 cm3 of copper attached to nothing.
         r_skin = float(np.interp(port.x_at, np.asarray(a.cowl_outer_x),
-                                 np.asarray(a.cowl_outer_r))) if False else port.r_hi - 5.0
+                                 np.asarray(a.cowl_outer_r)))
         out.plenums.append(size_plenum(
             "cowl_inlet_ring",
             mass_flow=ch.mass_flow_fuel * split.get("cowl", 0.5),
@@ -317,99 +329,90 @@ def design_manifolds(design, velocity: float = 4.0, aspect: float = 1.2,
             f"{out.lugs.shear_stress_pa / 1e6:.0f} MPa, edge "
             f"{out.lugs.edge_distance_mm:.1f} mm. Lengthen the lug or add more.")
 
-    # A plenum has to fit inside the metal that carries it, and it has to sit
-    # around the ring of orifices it exists to feed. Those are two constraints,
-    # and satisfying only the first is what went wrong here: sized on flow alone
-    # the fuel manifold and the oxidiser dome span r 67 to 135 mm between them,
-    # across a head disc that only runs 70 to 123, so they cut it clean in half.
-    # Packing them outward from the bore to fix that left the oxidiser dome at
-    # r 98 to 117 while its own orifices sat at r 88 -- the dome fed nothing,
-    # and the orifices pointed instead at the radius the *fuel* manifold
-    # occupies. Nothing downstream would have caught that: the part is
-    # watertight either way, and it took the sealed-void check noticing 325 cm3
-    # of powder with no way out.
+    # ---- lay the head out so every stream reaches the plenum it feeds ----
     #
-    # So each band is built around its own ring, and the wall between two bands
-    # falls halfway between the two rings.
+    # Three constraints at once, and satisfying any two of them is what went
+    # wrong here repeatedly. A plenum has to fit inside the metal that carries
+    # it; it has to be reachable by the orifices it feeds; and it has to be
+    # reachable by whatever feeds *it*.
+    #
+    # The arrangement that satisfies all three puts the fuel manifold inboard,
+    # wide, straddling its own orifice ring, and the oxidiser dome outboard and
+    # wide -- too far out to straddle its ring, so the ox orifices are fed by a
+    # short ring of radial ports instead. That is what a coaxial post does,
+    # done with the primitives this model already has.
+    #
+    # Sizing them on flow alone put the two of them across r 67 to 135 mm on a
+    # disc that runs 70 to 123, so they severed it. Packing them outward from
+    # the bore to fix that left the dome at r 98-117 with its orifices at r 88:
+    # the dome fed nothing and the orifices pointed at the radius the *fuel*
+    # manifold occupies. Both are watertight either way. Only the sealed-void
+    # check noticed, as 325 cm3 of powder with no way out.
     r_bore = float(a.cavity_r[0])
     wall = a.structure.wall_thickness_mm
-    r_lo, r_hi = r_bore + wall, a.flange_radius - wall
+    x_face = a.head_x
     head_plenums = [p for p in out.plenums if p.name != "cowl_inlet_ring"]
 
-    rings: dict[str, float] = {}
-    if design.injector is not None:
-        rings["head_fuel_manifold"] = design.injector.fuel_ring_radius * 1e3
-        rings["ox_dome"] = design.injector.ox_ring_radius * 1e3
+    if head_plenums and design.injector is not None:
+        r_fuel = design.injector.fuel_ring_radius * 1e3
+        r_ox = design.injector.ox_ring_radius * 1e3
+        d_ox = design.injector.d_ox_mm
 
-    if head_plenums and all(p.name in rings for p in head_plenums):
-        ordered = sorted(head_plenums, key=lambda p: rings[p.name])
-        radii = [rings[p.name] for p in ordered]
-
-        edges = [r_lo]
-        for lo, hi in zip(radii, radii[1:]):
-            if hi - lo <= 2.0 * wall:
-                out.notes.append(
-                    f"orifice rings at r {lo:.1f} and {hi:.1f} mm are "
-                    f"{hi - lo:.1f} mm apart, which leaves no room for a "
-                    f"{wall:.1f} mm wall between the manifolds feeding them. "
-                    f"Spread the injector rings or thin the wall.")
-            edges.append(0.5 * (lo + hi))
-        edges.append(r_hi)
-
-        # Depth available inside the disc, wall either side.
-        max_half_x = max(0.5 * (a.structure.head_thickness_mm - 2.0 * wall), 1.0)
-
-        for i, p in enumerate(ordered):
-            inner = edges[i] + (0.5 * wall if i else 0.0)
-            outer = edges[i + 1] - (0.5 * wall if i < len(ordered) - 1 else 0.0)
-            # Centred on the ring, so the section is deepest exactly where the
-            # orifices meet it rather than tapering to nothing there.
-            half_r = max(min(radii[i] - inner, outer - radii[i]), 1.0)
-            half_x = min(max(p.area_mm2 / (2.0 * half_r), half_r), max_half_x)
-
-            # The area is now whatever fits, so the velocity is whatever that
-            # area implies. Reporting the velocity that was asked for would be
-            # reporting a number the geometry does not have -- and the area is
-            # the filleted section's, not the sharp diamond's, for the same
-            # reason.
+        def _fit(p, r_lo, r_hi, x_aft, velocity):
+            """Re-place one plenum in a radial band, sized on flow, aspect >= 1."""
+            half_r = 0.5 * (r_hi - r_lo)
+            area = 0.5 * p.mass_flow / (p.density * velocity) * 1e6
+            half_r = max(half_r, 1.0)
+            half_x = max(area / (2.0 * half_r), half_r)     # aspect >= 1: it must hold its roof up
+            # x_aft is the aft face of the cavity, and it must stay a wall
+            # short of the injector face. Nudged past it, the manifold opens
+            # into the chamber -- which is watertight, drains, and is an engine
+            # that dumps its fuel manifold into the combustion zone.
+            x_c = x_aft - half_x
             from mesh_solid import plenum_section_area_mm2
-            area_m2 = plenum_section_area_mm2(half_x, half_r) * 1e-6
-            velocity = 0.5 * p.mass_flow / (p.density * area_m2)
+            v = 0.5 * p.mass_flow / (
+                p.density * plenum_section_area_mm2(half_x, half_r) * 1e-6)
+            return Plenum(name=p.name, x_mm=x_c, r_inner_mm=r_lo,
+                          half_x_mm=half_x, half_r_mm=half_r,
+                          mass_flow=p.mass_flow, velocity=v,
+                          density=p.density, feeds=p.feeds)
 
-            fixed = Plenum(
-                name=p.name, x_mm=p.x_mm, r_inner_mm=radii[i] - half_r,
-                half_x_mm=half_x, half_r_mm=half_r,
-                mass_flow=p.mass_flow, velocity=velocity,
-                density=p.density, feeds=p.feeds)
+        for p in list(head_plenums):
+            if p.name == "head_fuel_manifold":
+                # Inboard, straddling the fuel ring, and reaching far enough in
+                # that the centrebody's coolant can enter it through the narrow
+                # joint the spike shoulder leaves.
+                fixed = _fit(p, r_bore + 1.1, r_ox - 0.5 * d_ox - 3.0,
+                             x_face - wall, head_velocity)
+            elif p.name == "ox_dome":
+                # Outboard, clear of the fuel manifold and of the ox orifice
+                # ring, which it feeds through radial ports rather than by
+                # sitting on top of.
+                #
+                # Its inner radius is set by the cowl's coolant, not by the
+                # oxidiser. The cowl discharges at r 99 and has to run axially
+                # down to the fuel manifold; the dome is a continuous ring, so
+                # anything inside its radial band crosses it, and fuel crossing
+                # the oxidiser dome is the one failure this whole layout exists
+                # to prevent. The dome starts outboard of that corridor.
+                fixed = _fit(p, _cowl_discharge(design)[1] + 3.0,
+                             a.flange_radius - wall, x_face - wall, head_velocity)
+            else:
+                continue
             out.plenums[out.plenums.index(p)] = fixed
 
-            if velocity > p.velocity * 1.05:
-                out.notes.append(
-                    f"{p.name} runs at {velocity:.1f} m/s, not the "
-                    f"{p.velocity:.1f} asked for: the ring is {2 * half_r:.1f} mm "
-                    f"wide because that is the space between its orifice ring and "
-                    f"its neighbour's, and {2 * half_x:.0f} mm deep because that "
-                    f"is the disc. A manifold this fast distributes less evenly.")
-            if not fixed.reaches(radii[i], depth_mm=1.0):
-                out.notes.append(
-                    f"{p.name} is only {2 * fixed.half_x_at(radii[i]):.2f} mm deep "
-                    f"at r {radii[i]:.1f} mm where its orifices meet it. They will "
-                    f"not connect.")
-
-    # The head has to be thick enough to contain the plenums it carries, plus a
-    # wall either side. Sizing the disc by eye and then discovering the dome
-    # does not fit inside it is the manifold equivalent of the flange being too
-    # narrow for its own bolts.
-    in_head = [p for p in out.plenums if abs(p.x_mm - a.head_x) < a.structure.head_thickness_mm + 40.0
-               and p.name != "cowl_inlet_ring"]
-    if in_head:
-        need = 2.0 * max(p.half_x_mm for p in in_head) + 2.0 * a.structure.wall_thickness_mm
+        fm = next(q for q in out.plenums if q.name == "head_fuel_manifold")
+        od = next(q for q in out.plenums if q.name == "ox_dome")
+        gap = (od.r_inner_mm) - (fm.r_inner_mm + 2.0 * fm.half_r_mm)
+        if gap < wall:
+            out.notes.append(
+                f"only {gap:.1f} mm of metal between the fuel manifold and the "
+                f"oxidiser dome. They must not meet.")
+        need = 2.0 * max(fm.half_x_mm, od.half_x_mm) + 2.0 * wall
         if need > a.structure.head_thickness_mm:
             out.notes.append(
-                f"head disc is {a.structure.head_thickness_mm:.0f} mm thick and the "
-                f"manifolds inside it need {need:.0f} mm. Raise "
-                f"geometry.head_thickness_mm, or run the plenums slower so they "
-                f"shrink.")
+                f"head disc is {a.structure.head_thickness_mm:.0f} mm thick and its "
+                f"manifolds need {need:.0f} mm. Raise geometry.head_thickness_mm.")
 
     for p in out.plenums:
         if not p.self_supporting():
@@ -451,6 +454,28 @@ import numpy as np  # noqa: E402  (used by design_manifolds)
 # --------------------------------------------------------------------------
 # geometry
 # --------------------------------------------------------------------------
+
+def _discharge_band(design, part: str):
+    """
+    Radial band where a jacket's channels open onto the joint face.
+
+    This is where the coolant physically arrives, and every transfer feature
+    has to be built around it rather than around a nominal wall radius.
+    """
+    import numpy as np
+    from mesh_solid import centrebody_channels, cowl_channels
+    maker = cowl_channels if part == "cowl" else centrebody_channels
+    c = maker(design.assembly, design.circuits[part].channel)
+    w = float(np.interp(c.x_start, c.wall_x, c.wall_r))
+    sign = 1.0 if c.outward else -1.0
+    lo = w + sign * c.hot_wall_mm
+    hi = lo + sign * c.height_mm
+    return (min(lo, hi), max(lo, hi))
+
+
+def _cowl_discharge(design):
+    return _discharge_band(design, "cowl")
+
 
 def plenum_feeding(md: ManifoldDesign, radius_mm: float, depth_mm: float = 1.0):
     """
@@ -495,11 +520,12 @@ def geometry_features(design, md: ManifoldDesign, wall_mm: float | None = None):
     metal; the plenum is then hollowed inside the boss, which is why material is
     added before anything is subtracted.
     """
-    from mesh_solid import HoleCut, LugAdd, PlenumCut, RingBoss
+    from mesh_solid import HoleCut, LugAdd, PlenumCut, PortCut, RingBoss
 
     a = design.assembly
     wall = wall_mm if wall_mm is not None else a.structure.wall_thickness_mm
-    out = {part: {"bosses": [], "plenums": [], "lugs": [], "holes": []}
+    out = {part: {"bosses": [], "plenums": [], "lugs": [], "holes": [],
+                  "ports": []}
            for part in a.profiles}
 
     for p in md.plenums:
@@ -519,19 +545,106 @@ def geometry_features(design, md: ManifoldDesign, wall_mm: float | None = None):
                 x_at=p.x_mm, r_inner=p.r_inner_mm,
                 half_x=p.half_x_mm, half_r=p.half_r_mm))
 
-    # The orifices belong with the plenums they feed, so they are built here
-    # where both are known rather than from an assumed offset elsewhere.
+    # ---- the feed paths ----
+    #
+    # Everything below exists because a plenum that nothing reaches is not a
+    # manifold, it is a void full of powder. The port schedule used to name
+    # three inlets and the geometry cut none of them: the oxidiser dome had no
+    # way in at all, and the coolant leaving both jackets had no way from the
+    # joint face to the injector.
     if design.injector is not None:
         from mesh_solid import injector_holes
         fallback = a.head_x - (wall + 3.0)
+        inj = design.injector
+        fm = next((q for q in md.plenums if q.name == "head_fuel_manifold"), None)
+        od = next((q for q in md.plenums if q.name == "ox_dome"), None)
+        half_pitch = math.pi / inj.n_elements
+
+        # The fuel orifices sit under their manifold and start inside it. The
+        # oxidiser orifices do not: their dome is outboard, so they start at
+        # the ring of radial ports that feeds them.
+        x_ox = od.x_mm if od is not None else fallback
         out["head"]["holes"].extend(injector_holes(
-            a, design.injector,
+            a, inj,
             x_start_fuel=orifice_start_x(
-                md, design.injector.fuel_ring_radius * 1e3,
-                design.injector.d_fuel_mm, fallback),
-            x_start_ox=orifice_start_x(
-                md, design.injector.ox_ring_radius * 1e3,
-                design.injector.d_ox_mm, fallback)))
+                md, inj.fuel_ring_radius * 1e3, inj.d_fuel_mm, fallback),
+            x_start_ox=x_ox))
+
+        if od is not None:
+            # The oxidiser inlet itself: radial bores through the rim into the
+            # dome. There was no oxidiser inlet in the geometry at all -- the
+            # schedule named one on the head end face at r 101, where an axial
+            # hole misses the dome entirely and runs on into the injector.
+            # Split six ways so no single bore is a bridge wider than the
+            # process will span, and clocked off the bolt circle.
+            out["head"]["ports"].append(PortCut(
+                x_at=od.x_mm, diameter_mm=8.0, count=6,
+                r_lo=od.r_inner_mm + 2.0, r_hi=a.flange_radius + 2.0,
+                phase=math.pi / 12.0))
+
+            # Radial ports from the dome in to the head of every oxidiser
+            # orifice -- a coaxial post, built from the primitives to hand.
+            out["head"]["ports"].append(PortCut(
+                x_at=od.x_mm, diameter_mm=max(1.5, inj.d_ox_mm + 0.6),
+                count=inj.n_elements,
+                r_lo=inj.ox_ring_radius * 1e3 - 1.0,
+                r_hi=od.r_inner_mm + 2.0, phase=half_pitch))
+
+        if fm is not None and design.circuits:
+            # Both jackets discharge onto the joint face; from there the fuel
+            # has to reach the manifold under the injector.
+            cowl_lo, cowl_hi = _discharge_band(design, "cowl")
+            body_lo, body_hi = _discharge_band(design, "centrebody")
+            n_x = inj.n_elements
+            x_face = a.head_x
+
+            # A groove across each jacket's face collects all of its channels,
+            # so the transfer holes opposite need not line up with any of them.
+            # Centred on the face, so it is open across its full width there
+            # and tapers to a self-supporting point inside the part.
+            out["cowl"]["plenums"].append(PlenumCut(
+                x_at=x_face, r_inner=cowl_lo,
+                half_x=max(2.5, 0.5 * (cowl_hi - cowl_lo)),
+                half_r=0.5 * (cowl_hi - cowl_lo)))
+            out["centrebody"]["plenums"].append(PlenumCut(
+                x_at=x_face, r_inner=body_lo,
+                half_x=max(2.5, 0.5 * (body_hi - body_lo)),
+                half_r=0.5 * (body_hi - body_lo)))
+
+            # The centrebody's coolant comes in close to the bore, where the
+            # manifold already reaches, so it goes straight in.
+            # Sized by what the joint leaves, not by the flow: the spike
+            # shoulder and the bore are 3 mm apart, so the hole is as wide as
+            # the discharge and no wider, and the count carries the flow.
+            out["head"]["holes"].append(HoleCut(
+                radius_mm=0.5 * (body_lo + body_hi),
+                diameter_mm=body_hi - body_lo,
+                count=max(n_x, 128),
+                x_start=fm.x_mm - 0.4 * fm.half_x_mm, x_end=x_face + 1.0,
+                phase=0.0, name="transfer_centrebody"))
+
+            # The cowl's comes in at r 99 and has to cross to r 78. It cannot
+            # do that anywhere the dome exists, because the dome is a
+            # continuous ring: it runs axially down the corridor inboard of
+            # the dome, then turns in through the one window where the
+            # manifold has already begun and the dome has not.
+            # Set outward from the discharge, so the web left between the hole
+            # and the chamber stays above the process floor. Centred on the
+            # discharge instead, a wider hole leaves 0.4 mm of metal between
+            # the fuel and the combustion chamber.
+            d_cowl = 1.9
+            r_cowl = max(0.5 * (cowl_lo + cowl_hi),
+                         a.chamber_outer_radius + 0.7 + 0.5 * d_cowl)
+            x_turn = (0.5 * (fm.x_mm - fm.half_x_mm + od.x_mm - od.half_x_mm)
+                      if od is not None else fm.x_mm - 0.8 * fm.half_x_mm)
+            out["head"]["holes"].append(HoleCut(
+                radius_mm=r_cowl, diameter_mm=d_cowl,
+                count=n_x, x_start=x_turn - 1.5, x_end=x_face + 1.0,
+                phase=0.0, name="transfer_cowl"))
+            out["head"]["ports"].append(PortCut(
+                x_at=x_turn, diameter_mm=2.0, count=n_x,
+                r_lo=fm.r_inner_mm + 0.4 * fm.half_r_mm,
+                r_hi=cowl_hi + 1.0, phase=0.0))
 
     if md.lugs is not None:
         L = md.lugs
