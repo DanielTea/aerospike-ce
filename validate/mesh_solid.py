@@ -33,6 +33,24 @@ from skimage.measure import marching_cubes
 
 from engine_ref import EngineAssembly, Profile
 
+# A profile vertex this close to r = 0 is on the axis of revolution.
+AXIS_EPS = 1e-9
+
+# How far outside the zero set the surface is actually taken.
+#
+# Marching cubes is degenerate wherever a sample sits exactly on the surface,
+# and on a solid of revolution that is not a coincidence, it is the common
+# case: every flat face is normal to the axis, so is every lattice plane, and
+# a face a whole number of voxels from the grid origin lands on a plane of
+# samples that all read exactly zero. The head's two faces do it at the
+# default 0.2 mm, and what comes out is a million zero-area triangles with
+# holes between them, from a field that is perfectly correct.
+#
+# A tenth of a micron is four orders under the voxel, three under anything the
+# process can hold, and far enough above the float32 quantum near zero that no
+# sample lands on it.
+SURFACE_BIAS_MM = 1e-4
+
 
 # --------------------------------------------------------------------------
 # 2D signed distance in the meridional plane
@@ -46,6 +64,16 @@ def _polygon_sdf(px: np.ndarray, pr: np.ndarray,
     Negative inside. Distance is measured to the nearest edge segment; the sign
     comes from a separate crossing count, because a nearest-edge normal test
     gets corners wrong and corners are most of this profile.
+
+    Edges lying on the axis are not surfaces and are skipped. A meridional
+    profile that closes on r = 0 carries one -- the centrebody runs three
+    millimetres down the axis, from the middle of the truncation face to the
+    apex of its cavity -- and revolving it sweeps no area at all. Measured as
+    an edge it puts the zero level set down the middle of solid metal, and
+    marching cubes then meshes a zero-width sheet along the axis: degenerate
+    triangles, edges shared by sixteen faces, a part every slicer rejects.
+    They cannot affect the crossing count either, both endpoints sitting at
+    the same radius.
     """
     n = len(vx)
     ax, ar_ = vx, vr
@@ -55,10 +83,14 @@ def _polygon_sdf(px: np.ndarray, pr: np.ndarray,
     ll = ex * ex + er * er
     ll[ll < 1e-30] = 1e-30
 
+    on_axis = (ar_ <= AXIS_EPS) & (br <= AXIS_EPS)
+
     best = np.full(px.shape, np.inf, dtype=np.float32)
     inside = np.zeros(px.shape, dtype=bool)
 
     for i in range(n):
+        if on_axis[i]:
+            continue
         wx = px - ax[i]
         wr = pr - ar_[i]
         t = np.clip((wx * ex[i] + wr * er[i]) / ll[i], 0.0, 1.0)
@@ -420,7 +452,8 @@ def mesh_field(field: np.ndarray, origin, voxel_mm: float):
         (field.shape[0] - 1) and voxel_mm or voxel_mm,
         voxel_mm, voxel_mm,
     )
-    verts, faces, _, _ = marching_cubes(field, level=0.0, spacing=spacing)
+    verts, faces, _, _ = marching_cubes(field, level=SURFACE_BIAS_MM,
+                                        spacing=spacing)
     verts = verts + np.asarray(origin, dtype=float)
     return verts, faces.astype(np.int64)
 
@@ -615,6 +648,8 @@ def _polygon_sdf_radial(x_val: float, r_grid: np.ndarray,
     interpolating onto the (y, z) grid turns the cost of a plane from a few
     hundred million operations into a few million, which is the difference
     between a mesh that resolves a 0.4 mm channel and one that does not.
+
+    Axis edges are skipped here for the reason given in `_polygon_sdf`.
     """
     n = len(vx)
     ax, ar = vx, vr
@@ -623,10 +658,14 @@ def _polygon_sdf_radial(x_val: float, r_grid: np.ndarray,
     ll = ex * ex + er * er
     ll[ll < 1e-30] = 1e-30
 
+    on_axis = (ar <= AXIS_EPS) & (br <= AXIS_EPS)
+
     best = np.full(r_grid.shape, np.inf, dtype=np.float64)
     inside = np.zeros(r_grid.shape, dtype=bool)
 
     for i in range(n):
+        if on_axis[i]:
+            continue
         wx = x_val - ax[i]
         wr = r_grid - ar[i]
         t = np.clip((wx * ex[i] + wr * er[i]) / ll[i], 0.0, 1.0)
@@ -796,8 +835,8 @@ def build_mesh_streaming(
             block[k - i0] = plane(k)
         cache = {i1: block[-1].copy()}          # reused as the next slab's first
 
-        if block.min() < 0.0 < block.max():
-            v, f, _, _ = marching_cubes(block, level=0.0,
+        if block.min() < SURFACE_BIAS_MM < block.max():
+            v, f, _, _ = marching_cubes(block, level=SURFACE_BIAS_MM,
                                         spacing=(voxel_mm, voxel_mm, voxel_mm))
             v = v + np.array([xs[i0], ys[0], zs[0]])
             all_v.append(v)
@@ -952,8 +991,8 @@ def stream_mesh_to_stl(
                 block[k - i0] = plane(k)
             carry = block[-1].copy()
 
-            if block.min() < 0.0 < block.max():
-                v, f, _, _ = marching_cubes(block, level=0.0,
+            if block.min() < SURFACE_BIAS_MM < block.max():
+                v, f, _, _ = marching_cubes(block, level=SURFACE_BIAS_MM,
                                             spacing=(voxel_mm, voxel_mm, voxel_mm))
                 v = v + np.array([xs[i0], ys[0], ys[0]])
                 a, b, c = v[f[:, 0]], v[f[:, 1]], v[f[:, 2]]
