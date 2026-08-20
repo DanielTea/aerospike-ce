@@ -4,39 +4,56 @@ A checked, print-resolution model of the whole engine: three solids in one 3MF,
 dimensioned in millimetres, with every cooling channel, injector orifice and
 mounting hole in it.
 
-**Download:** [regen-spike-75.3mf](https://github.com/DanielTea/aerospike-ce/releases/download/v0.1.0/regen-spike-75.3mf)
-(361 MiB, from the [v0.1.0 release](https://github.com/DanielTea/aerospike-ce/releases/tag/v0.1.0))
+> **The published v0.1.0 asset is superseded.** It was built before the slicing
+> gates existed and carries **6,334 triangles with no area** -- 793 on the
+> centrebody, 5,300 on the cowl, 241 on the head. Every part in it is watertight
+> at the right genus, which is exactly the problem: a zero-area triangle breaks
+> no edge pairing, contributes no volume and moves no Euler characteristic, so
+> nothing in the gate at the time could see it. A slicer can, and reports it as
+> missing or extraneous surfaces. Rebuild rather than download it.
 
-It is a release asset rather than a file in the tree because it is 249 MB, and
+It is a release asset rather than a file in the tree because it is 409 MB, and
 a generated artifact of that size does not belong in git history. The thing
 worth versioning is the generator, which is here.
 
-Regenerate with:
+Build and check it with:
 
 ```bash
 cd validate
 python print_ready.py --spec ../spec/regen.json --out ../docs/print
-python verify_print_file.py ../docs/print/regen-spike-75.3mf
+python pipeline.py --file ../docs/print/regen-spike-75.3mf --json ../out/release.json
 ```
 
-The first command builds it. The second reopens the written file as a stranger
-would and re-derives every property from what is on disk, because checking the
-meshes in memory and then writing them leaves the writer -- the part a slicer
-actually sees -- unchecked.
+The first command builds it, refusing to write rather than writing something
+plausible. The second is the release gate: it reopens the file as a stranger
+would and re-derives every property from what is on disk, across all five
+stages. Checking the meshes in memory and then writing them leaves the writer
+-- the part a slicer actually sees -- unchecked, and that gap is not
+theoretical: it hid 416 zero-area triangles in the first build of this file
+that had none in memory.
 
 ## What is in it
 
 Meshed at 0.233 mm, the voxel the narrowest feature asks for. Every part
-watertight, no boundary or non-manifold edges, no cavity without a way out.
+watertight, no boundary or non-manifold edges, no cavity without a way out, no
+zero-area triangle, no duplicated face, no patch wound inside out and no vertex
+where the surface pinches -- checked on the grid the file is written on.
 
-| part | triangles | genus | volume | mass |
-|---|---|---|---|---|
-| centrebody | 8,221,408 | 328 | 402.5 cm3 | 3.52 kg |
-| cowl | 20,360,540 | 393 | 392.8 cm3 | 3.44 kg |
-| head | 7,726,382 | 281 | 1574.6 cm3 | 13.79 kg |
+| part | triangles | genus | volume | mass | decimation |
+|---|---|---|---|---|---|
+| centrebody | 8,221,176 | 328 | 402.49 cm3 | 3.524 kg | keep 0.50 |
+| cowl | 20,357,084 | 393 | 392.84 cm3 | 3.440 kg | keep 0.85 |
+| head | 7,726,426 | 281 | 1574.58 cm3 | 13.787 kg | keep 0.70 |
 
-36,308,330 triangles, 20.75 kg, 378 MB. The equivalent binary STL would be
+36,304,686 triangles, 20.75 kg, 409 MB. The equivalent binary STL would be
 1815 MB, and would not say what unit it was in.
+
+Vertices are written to six decimal places -- a nanometre -- rather than four,
+and the mesh is snapped onto that grid and welded there *before* it is checked.
+Four decimals is a tenth of a micron, which is far under any printer and not
+under the mesher: `mesh_solid.level_guard_mm` separates a marching-cubes vertex
+from its sample by about 1.5e-4 mm, so writing at 1e-4 rounded away the
+separation the guard exists to create. That is the 416.
 
 The head is two thirds of the mass because it is a 46 mm slab of copper,
 thickened to contain its manifolds. If mass matters, that is the first place to
