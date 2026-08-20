@@ -481,3 +481,99 @@ def test_a_flat_face_landing_on_the_lattice_still_meshes(margin_mm):
 
     want = math.pi * (5.0 ** 2 - 1.0 ** 2) * 4.0
     assert abs(mesh_volume(v, f) - want) / want < 0.02
+
+
+@pytest.mark.parametrize("index", [16, 1024])
+def test_a_sample_a_hair_off_the_level_does_not_collapse_the_vertex(index):
+    """
+    Marching cubes works in index units, in single precision.
+
+    The bias keeps whole planes of samples off the level. It does nothing for
+    the one sample in a hundred million that lands just beside it by chance,
+    and out at index 1024 a float32 resolves about 6e-5 of an index -- so a
+    crossing at t = 2e-5 is placed exactly *on* the sample rather than beside
+    it, and so is every other edge into that sample. The weld then merges what
+    marching cubes meant to keep apart and the surface pinches: one edge in
+    four faces, no boundary anywhere, an odd Euler characteristic, nothing to
+    see in a viewer. The cowl did it once in 24 million triangles.
+
+    The value here is the one measured at that pinch, five nanometres inside
+    the channel floor. Near the origin the same configuration is harmless,
+    which is the point: this is a precision failure, not a geometry failure,
+    and it only bites far from the index origin.
+    """
+    from skimage.measure import marching_cubes
+
+    from mesh_solid import SURFACE_BIAS_MM, _mesh_block
+
+    def block():
+        b = np.full((3, index + 6, index + 6), 1.0, dtype=np.float32)
+        b[1, index, index] = np.float32(9.509921e-05)      # just inside the level
+        b[1, index, index - 1] = b[1, index - 1, index] = b[0, index, index] = -0.2
+        return b
+
+    def coincident(v):
+        return len(v) - len(np.unique(np.round(v / 1e-12).astype(np.int64), axis=0))
+
+    raw, _, _, _ = marching_cubes(block(), level=SURFACE_BIAS_MM,
+                                  spacing=(0.233, 0.233, 0.233))
+    guarded, _ = _mesh_block(block(), 0.233)
+
+    if index == 1024:
+        assert coincident(raw) > 0, (
+            "the unguarded call is expected to collapse here; if it no longer "
+            "does, the guard is being tested against nothing")
+    assert coincident(guarded) == 0, "the guard must keep every vertex distinct"
+
+
+def test_the_level_guard_leaves_a_clean_field_alone():
+    """
+    It moves samples inside a band a micron wide and nothing else. A field with
+    no sample near the level must mesh to exactly what marching cubes gives.
+    """
+    from skimage.measure import marching_cubes
+
+    from mesh_solid import SURFACE_BIAS_MM, _mesh_block
+
+    rng = np.random.default_rng(7)
+    b = (rng.random((6, 40, 40)).astype(np.float32) - 0.5) * 2.0
+    b[np.abs(b - SURFACE_BIAS_MM) < 0.01] = 0.5           # clear the band by far
+
+    raw_v, raw_f, _, _ = marching_cubes(b, level=SURFACE_BIAS_MM, spacing=(0.2,) * 3)
+    got_v, got_f = _mesh_block(b.copy(), 0.2)
+    assert np.array_equal(raw_v, got_v)
+    assert np.array_equal(raw_f, got_f)
+
+
+def test_the_level_guard_does_not_move_the_surface_it_meshes():
+    """
+    Pushing a sample to the edge of the band keeps it on the side it was on, so
+    no cell changes classification and the volume stays put. A guard that could
+    flip a sample would be a guard that quietly redesigns the part.
+    """
+    from mesh_export import mesh_volume
+    from mesh_solid import (SURFACE_BIAS_MM, _mesh_block, hold_off_level,
+                            level_guard_mm)
+
+    n, voxel, radius = 60, 0.2, 4.0
+    g = (np.arange(n) - (n - 1) / 2.0) * voxel
+    X, Y, Z = np.meshgrid(g, g, g, indexing="ij")
+    ball = (np.sqrt(X ** 2 + Y ** 2 + Z ** 2) - radius).astype(np.float32)
+
+    v, f = _mesh_block(ball.copy(), voxel)
+    v = v - (n - 1) / 2.0 * voxel
+    want = 4.0 / 3.0 * math.pi * radius ** 3
+    assert abs(mesh_volume(v, f) - want) / want < 0.01
+
+    # Every sample the guard touches must stay on the side it was on: a guard
+    # that could flip one would move a cell across the level and quietly
+    # redesign the part. Checked on a field seeded to land in the band.
+    guard = level_guard_mm(ball.shape, voxel)
+    seeded = ball.copy()
+    seeded.reshape(-1)[::997] = np.float32(SURFACE_BIAS_MM - 0.1 * guard)
+    seeded.reshape(-1)[1::997] = np.float32(SURFACE_BIAS_MM + 0.1 * guard)
+    held = hold_off_level(seeded, voxel)
+    assert held is not seeded, "the band was seeded; the guard should have fired"
+    assert np.array_equal(held >= SURFACE_BIAS_MM, seeded >= SURFACE_BIAS_MM)
+    assert np.all(np.abs(held - SURFACE_BIAS_MM) >= guard * (1.0 - 1e-6))
+    assert np.max(np.abs(held - seeded)) <= guard * 2.0

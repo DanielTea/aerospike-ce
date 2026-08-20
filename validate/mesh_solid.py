@@ -52,6 +52,64 @@ AXIS_EPS = 1e-9
 SURFACE_BIAS_MM = 1e-4
 
 
+def level_guard_mm(shape, voxel_mm: float) -> float:
+    """
+    How far a sample has to stay from the level for its vertex to be distinct.
+
+    Two things set it. A float32 index carries about `n * 2^-24` of absolute
+    resolution, where n is how far out the indices go; eight of those puts the
+    vertex unambiguously beside the sample rather than on it. And the field is
+    a distance function, so it changes by at most a voxel between neighbours --
+    doubled here, because a channel floor riding an inclined wall is steeper
+    than one, and the band has to hold for the steepest edge in the block.
+    """
+    return 8.0 * max(shape) * 2.0 ** -24 * (2.0 * voxel_mm)
+
+
+def hold_off_level(block: np.ndarray, voxel_mm: float,
+                   level: float = SURFACE_BIAS_MM) -> np.ndarray:
+    """
+    Push samples out of the band around the level, each to the side it was on.
+
+    The bias moves the level off the zero set, which is what stops a flat face
+    landing on a lattice plane from meshing as a sheet of degenerate triangles.
+    It does not stop the same thing happening to one sample in a hundred
+    million by chance, and that is a different failure with a different cure.
+
+    Marching cubes places a vertex along a grid edge at t = (level - v0) /
+    (v1 - v0), and it works in *index* units, in single precision. Out at index
+    1024 a float32 resolves about 6e-5 of an index, so a crossing with t below
+    that lands exactly on the sample instead of just beside it -- and every
+    other edge into that sample lands there too. The weld then merges what
+    marching cubes meant to keep apart, and the surface pinches: one edge shared
+    by four faces, no boundary anywhere, an odd Euler characteristic, and
+    nothing whatsoever to see. The cowl did it once in 24 million triangles,
+    five nanometres from the channel floor, and sliding the lattice 0.08 mm made
+    it vanish -- which is how you tell arithmetic from geometry.
+
+    Pushed to the same side, so no cell changes classification and the topology
+    is exactly what it was; the surface moves by at most the band, which is
+    about a micron against a 233 micron voxel. Returns the input untouched when
+    nothing is in the band, and a copy otherwise -- the caller's field is not
+    ours to move.
+    """
+    guard = level_guard_mm(block.shape, voxel_mm)
+    near = np.abs(block - level) < guard
+    if not near.any():
+        return block
+    out = block.copy()
+    out[near] = np.where(block[near] >= level, level + guard, level - guard)
+    return out
+
+
+def _mesh_block(block: np.ndarray, voxel_mm: float, level: float = SURFACE_BIAS_MM):
+    """Marching cubes over one block, with every sample held off the level."""
+    block = hold_off_level(block, voxel_mm, level)
+    verts, faces, _, _ = marching_cubes(block, level=level,
+                                        spacing=(voxel_mm, voxel_mm, voxel_mm))
+    return verts, faces
+
+
 # --------------------------------------------------------------------------
 # 2D signed distance in the meridional plane
 # --------------------------------------------------------------------------
@@ -504,12 +562,7 @@ def build_field(
 
 def mesh_field(field: np.ndarray, origin, voxel_mm: float):
     """Marching cubes at the zero level set, returned in model coordinates."""
-    spacing = (
-        (field.shape[0] - 1) and voxel_mm or voxel_mm,
-        voxel_mm, voxel_mm,
-    )
-    verts, faces, _, _ = marching_cubes(field, level=SURFACE_BIAS_MM,
-                                        spacing=spacing)
+    verts, faces = _mesh_block(field, voxel_mm)
     verts = verts + np.asarray(origin, dtype=float)
     return verts, faces.astype(np.int64)
 
@@ -782,6 +835,7 @@ def build_mesh_streaming(
     plenums: list[PlenumCut] | None = None,
     ribs: list[RibAdd] | None = None,
     legs: list[LegAdd] | None = None,
+    stats: dict | None = None,
 ):
     """
     Marching cubes over the volume in slabs, welded into one mesh.
@@ -794,6 +848,13 @@ def build_mesh_streaming(
     Consecutive slabs overlap by exactly one plane of samples: marching cubes
     consumes cells, not planes, so an overlap of one keeps every cell processed
     exactly once and leaves no seam.
+
+    Pass a dict as `stats` to get the volume of the field back as well. Every
+    plane is evaluated here already, so integrating the occupancy costs one
+    clip and one sum per plane -- and it gives the mesh an independent number
+    to be checked against, by a different route through the same field. Working
+    that volume out analytically instead means modelling every feature a second
+    time and hoping the overlaps cancel.
     """
     channels = channels or []
     holes = holes or []
@@ -843,6 +904,8 @@ def build_mesh_streaming(
     vx = np.asarray(profile.x, dtype=float)
     vr = np.asarray(profile.r, dtype=float)
 
+    occupied = [0.0]                     # cells' worth of metal, summed per plane
+
     def plane(i: int) -> np.ndarray:
         prof1d = _polygon_sdf_radial(xs[i], r_grid, vx, vr)
         d = np.interp(R, r_grid, prof1d).astype(np.float32)
@@ -883,6 +946,10 @@ def build_mesh_streaming(
             d = np.maximum(d, _wedge_sdf(Y.astype(np.float32),
                                          Z.astype(np.float32),
                                          keep_sector[0], keep_sector[1]))
+        if stats is not None:
+            # The partial-cell ramp marching cubes itself uses to place a
+            # vertex, so the two agree to well under the cell rather than to it.
+            occupied[0] += float(np.clip(0.5 - d / voxel_mm, 0.0, 1.0).sum())
         return d
 
     all_v: list[np.ndarray] = []
@@ -901,8 +968,7 @@ def build_mesh_streaming(
         cache = {i1: block[-1].copy()}          # reused as the next slab's first
 
         if block.min() < SURFACE_BIAS_MM < block.max():
-            v, f, _, _ = marching_cubes(block, level=SURFACE_BIAS_MM,
-                                        spacing=(voxel_mm, voxel_mm, voxel_mm))
+            v, f = _mesh_block(block, voxel_mm)
             v = v + np.array([xs[i0], ys[0], zs[0]])
             all_v.append(v)
             all_f.append(f.astype(np.int64) + offset)
@@ -910,6 +976,10 @@ def build_mesh_streaming(
         if progress:
             print(f"  slab {i0:5d}/{nx - 1}  {len(all_f)} pieces", flush=True)
         i0 = i1
+
+    if stats is not None:
+        stats["field_volume_mm3"] = occupied[0] * voxel_mm ** 3
+        stats["grid"] = (nx, ny, nz)
 
     if not all_v:
         raise ValueError("the field never crosses zero; nothing to mesh")
@@ -1057,8 +1127,7 @@ def stream_mesh_to_stl(
             carry = block[-1].copy()
 
             if block.min() < SURFACE_BIAS_MM < block.max():
-                v, f, _, _ = marching_cubes(block, level=SURFACE_BIAS_MM,
-                                            spacing=(voxel_mm, voxel_mm, voxel_mm))
+                v, f = _mesh_block(block, voxel_mm)
                 v = v + np.array([xs[i0], ys[0], ys[0]])
                 a, b, c = v[f[:, 0]], v[f[:, 1]], v[f[:, 2]]
                 nrm = np.cross(b - a, c - a)
