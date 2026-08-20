@@ -88,6 +88,32 @@ namespace AerospikeCE
         [JsonPropertyName("phase_rad")]      public double PhaseRad { get; set; }
     }
 
+    public sealed class PlanRib
+    {
+        [JsonPropertyName("base")]          public PlanPoints Base { get; set; } = new();
+        [JsonPropertyName("count")]         public int Count { get; set; }
+        [JsonPropertyName("height_mm")]     public double HeightMm { get; set; }
+        [JsonPropertyName("root_width_mm")] public double RootWidthMm { get; set; }
+        [JsonPropertyName("flank_deg")]     public double FlankDeg { get; set; }
+        [JsonPropertyName("x_start_mm")]    public double XStartMm { get; set; }
+        [JsonPropertyName("x_end_mm")]      public double XEndMm { get; set; }
+        [JsonPropertyName("outward")]       public bool Outward { get; set; }
+        [JsonPropertyName("phase_rad")]     public double PhaseRad { get; set; }
+    }
+
+    public sealed class PlanLeg
+    {
+        [JsonPropertyName("count")]          public int Count { get; set; }
+        [JsonPropertyName("x_top_mm")]       public double XTopMm { get; set; }
+        [JsonPropertyName("r_top_mm")]       public double RTopMm { get; set; }
+        [JsonPropertyName("x_foot_mm")]      public double XFootMm { get; set; }
+        [JsonPropertyName("r_foot_mm")]      public double RFootMm { get; set; }
+        [JsonPropertyName("thickness_mm")]   public double ThicknessMm { get; set; }
+        [JsonPropertyName("half_width_deg")] public double HalfWidthDeg { get; set; }
+        [JsonPropertyName("pad_radius_mm")]  public double PadRadiusMm { get; set; }
+        [JsonPropertyName("phase_rad")]      public double PhaseRad { get; set; }
+    }
+
     public sealed class PlanPart
     {
         [JsonPropertyName("profile")]  public PlanPoints Profile { get; set; } = new();
@@ -97,6 +123,8 @@ namespace AerospikeCE
         [JsonPropertyName("bosses")]   public List<PlanBoss> Bosses { get; set; } = new();
         [JsonPropertyName("lugs")]     public List<PlanLug> Lugs { get; set; } = new();
         [JsonPropertyName("plenums")]  public List<PlanPlenum> Plenums { get; set; } = new();
+        [JsonPropertyName("ribs")]     public List<PlanRib> Ribs { get; set; } = new();
+        [JsonPropertyName("legs")]     public List<PlanLeg> Legs { get; set; } = new();
     }
 
     public sealed class PlanSummary
@@ -141,6 +169,9 @@ namespace AerospikeCE
             {
                 if (part.Profile.X.Length < 3 || part.Profile.X.Length != part.Profile.R.Length)
                     throw new Exception($"part '{name}' has a malformed profile");
+                foreach (var rb in part.Ribs)
+                    if (rb.Base.X.Length < 2 || rb.Base.X.Length != rb.Base.R.Length)
+                        throw new Exception($"part '{name}' has a rib with no base surface");
             }
             return plan;
         }
@@ -209,8 +240,24 @@ namespace AerospikeCE
                 XAt = m.XMm, RInner = m.RInnerMm, HalfX = m.HalfXMm, HalfR = m.HalfRMm,
             }).ToList();
 
+            var ribs = p.Ribs.Select(rb => new RibAdd
+            {
+                BaseX = rb.Base.X, BaseR = rb.Base.R, Count = rb.Count,
+                HeightMm = rb.HeightMm, RootWidthMm = rb.RootWidthMm,
+                FlankDeg = rb.FlankDeg, XStart = rb.XStartMm, XEnd = rb.XEndMm,
+                Outward = rb.Outward, Phase = rb.PhaseRad,
+            }).ToList();
+
+            var legs = p.Legs.Select(l => new LegAdd
+            {
+                Count = l.Count, XTop = l.XTopMm, RTop = l.RTopMm,
+                XFoot = l.XFootMm, RFoot = l.RFootMm,
+                ThicknessMm = l.ThicknessMm, HalfWidthDeg = l.HalfWidthDeg,
+                PadRadiusMm = l.PadRadiusMm, Phase = l.PhaseRad,
+            }).ToList();
+
             return new CooledPart((p.Profile.X, p.Profile.R), channels, holes, ports,
-                                  bosses, lugs, plenums, 1.0f, tableStepMm);
+                                  bosses, lugs, plenums, ribs, legs, 1.0f, tableStepMm);
         }
     }
 }
