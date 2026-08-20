@@ -230,6 +230,7 @@ def test_head_meshes_with_exactly_the_right_topology(design):
     rep = manifold_report(*with_features)
     assert rep["watertight"]
     assert rep["boundary_edges"] == 0
+    assert rep["degenerate_faces"] == 0
 
     v_plain = mesh_volume(*plain)
     v_feat = mesh_volume(*with_features)
@@ -268,3 +269,101 @@ def test_orifices_stay_drillable(design):
     from mesh_solid import injector_holes
     for h in injector_holes(design.assembly, design.injector):
         assert (h.x_end - h.x_start) / h.diameter_mm < 12.0
+
+
+# --------------------------------------------------------------------------
+# the axis
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("spec_name", ["demo.json", "regen.json"])
+@pytest.mark.parametrize("sampler", ["planar", "radial"])
+def test_the_field_puts_no_surface_down_the_axis(spec_name, sampler):
+    """
+    The centrebody profile closes on r = 0: in from the truncation face, along
+    the axis, out again at the apex of the cavity. Revolved, that segment
+    sweeps no area at all -- it is the axis, not a surface -- and the metal it
+    runs through is solid.
+
+    Measured as an edge it reads as one. The field collapses to zero along the
+    axis, marching cubes meshes a zero-width sheet there, and the part comes
+    out with degenerate triangles and edges shared by sixteen faces. It still
+    looks like an engine in a viewer; a slicer refuses it.
+
+    On the axis between apex and face the nearest real surface is whichever end
+    is nearer, the outer surface being twelve millimetres away, so the field is
+    exactly that depth and negative.
+    """
+    from engine_ref import assembly_from_spec
+    from mesh_solid import _polygon_sdf_radial
+
+    path = os.path.join(os.path.dirname(__file__), "..", "spec", spec_name)
+    with open(path, encoding="utf-8") as fh:
+        a = assembly_from_spec(json.load(fh))
+
+    p = a.profiles["centrebody"]
+    vx = np.asarray(p.x, dtype=float)
+    vr = np.asarray(p.r, dtype=float)
+
+    on_axis = np.flatnonzero(vr <= 1e-9)
+    assert len(on_axis) >= 2, "the centrebody is meant to close on the axis"
+    x_hi, x_lo = vx[on_axis].max(), vx[on_axis].min()
+    assert x_hi - x_lo > 1.0, "expected a run of axis, not a single point"
+
+    xs = np.linspace(x_lo + 0.05, x_hi - 0.05, 25)
+    if sampler == "planar":
+        d = _polygon_sdf(xs, np.zeros_like(xs), vx, vr)
+    else:
+        d = np.array([_polygon_sdf_radial(x, np.zeros(1), vx, vr)[0] for x in xs])
+
+    depth = np.minimum(x_hi - xs, xs - x_lo)
+    assert np.all(d < 0.0), "the axis of the spike tip is solid metal"
+    assert np.allclose(d, -depth, atol=2e-3), (
+        "the field on the axis should measure to the nearest real surface, "
+        f"worst error {np.max(np.abs(d + depth)):.4f} mm")
+
+
+# --------------------------------------------------------------------------
+# the lattice
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("margin_mm", [1.0, 1.1])
+def test_a_flat_face_landing_on_the_lattice_still_meshes(margin_mm):
+    """
+    Marching cubes is degenerate where a sample sits exactly on the surface.
+
+    On a solid of revolution that is not bad luck, it is the ordinary case:
+    the flat faces are normal to the axis, so are the lattice planes, and a
+    face a whole number of voxels from the grid origin lands on a plane of
+    samples that all read exactly zero. The head does it at the default 0.2 mm
+    and came back with 1.3 million zero-area triangles and 120,000 boundary
+    edges -- a mesh with holes in it, from a field that was entirely correct.
+    A slicer refuses that; nothing in a viewer shows it.
+
+    Both margins here are meant to pass. One puts the face on a sample plane
+    and the other between two, because a mesher that only works when the
+    geometry misses the lattice is a mesher that works by luck.
+    """
+    from engine_ref import Profile
+    from mesh_export import manifold_report, mesh_volume
+    from mesh_solid import build_field, mesh_field
+
+    voxel = 0.25
+    disc = Profile(name="disc",
+                   x=np.array([-2.0, 2.0, 2.0, -2.0]),
+                   r=np.array([1.0, 1.0, 5.0, 5.0]))
+
+    field, origin, spacing = build_field(disc, voxel_mm=voxel, margin_mm=margin_mm)
+    step = (2.0 * margin_mm + 4.0) / (field.shape[0] - 1)
+    on_plane = abs(margin_mm / step - round(margin_mm / step)) < 1e-9
+    v, f = mesh_field(field, origin, spacing)
+
+    rep = manifold_report(v, f)
+
+    where = "on a sample plane" if on_plane else "between sample planes"
+    assert rep["watertight"], f"face {where}: {rep}"
+    assert rep["boundary_edges"] == 0, f"face {where}: holes in the surface"
+    assert rep["degenerate_faces"] == 0, f"face {where}: zero-area triangles"
+    assert rep["euler"] == 0, f"a bored disc revolves into a torus, got {rep['euler']}"
+
+    want = math.pi * (5.0 ** 2 - 1.0 ** 2) * 4.0
+    assert abs(mesh_volume(v, f) - want) / want < 0.02

@@ -160,13 +160,19 @@ def mesh_area(v: np.ndarray, f: np.ndarray) -> float:
 
 def manifold_report(v: np.ndarray, f: np.ndarray) -> dict:
     """
-    Edge and Euler bookkeeping.
+    Edge and Euler bookkeeping, and a count of triangles with no area.
 
     A closed surface has every edge in exactly two triangles. The Euler
     characteristic then names the topology: 2 for a sphere, 0 for a torus. A
     part whose profile touches the axis revolves into a sphere; one whose
     profile does not -- anything with a through bore -- revolves into a torus.
     Getting 1 or an odd number means the mesh has a hole in it.
+
+    None of that sees a triangle with three collinear vertices: by index it is
+    a perfectly ordinary face. A slicer disagrees -- it has no normal to offset
+    and no side to be inside of, and a plane of them is what Cura means by
+    missing or extraneous surfaces. They are counted here because the edge
+    arithmetic passed a mesh that would not slice.
     """
     e = np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]])
     e = np.sort(e, axis=1)
@@ -181,7 +187,13 @@ def manifold_report(v: np.ndarray, f: np.ndarray) -> dict:
         "watertight": bool(np.all(counts == 2)),
         "boundary_edges": int(np.sum(counts == 1)),
         "nonmanifold_edges": int(np.sum(counts > 2)),
+        "degenerate_faces": int(np.sum(_face_areas(v, f) <= 0.0)),
     }
+
+
+def _face_areas(v: np.ndarray, f: np.ndarray) -> np.ndarray:
+    a, b, c = v[f[:, 0]], v[f[:, 1]], v[f[:, 2]]
+    return 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)
 
 
 # --------------------------------------------------------------------------

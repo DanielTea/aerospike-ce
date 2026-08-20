@@ -105,6 +105,31 @@ namespace AerospikeCE
         private readonly List<LegAdd> _legs;
         private readonly BBox3 _bounds;
 
+        /// <summary>
+        /// A profile vertex this close to r = 0 is on the axis of revolution.
+        /// </summary>
+        private const double AxisEpsMm = 1e-9;
+
+        /// <summary>
+        /// How far outside the zero set the surface is actually taken.
+        ///
+        /// The kernel's mesher is degenerate where a sample sits exactly on
+        /// the surface, and on a solid of revolution that is not bad luck but
+        /// the ordinary case: the flat faces are normal to the axis, so are
+        /// the lattice planes, and a face a whole number of voxels from the
+        /// grid origin lands on a plane of samples that all read exactly zero.
+        /// The head does it at 0.2 mm and came back with four hundred thousand
+        /// zero-area triangles and a quarter of a million edges shared by more
+        /// than two faces, from a field that was entirely correct. Cura will
+        /// not slice it and nothing in a viewer shows why.
+        ///
+        /// A tenth of a micron is four orders under the voxel and three under
+        /// anything the process can hold. Mirrors SURFACE_BIAS_MM in
+        /// validate/mesh_solid.py, where the same bias is applied as the
+        /// marching-cubes level.
+        /// </summary>
+        private const double SurfaceBiasMm = 1e-4;
+
         // Tabulated profile distance over (x, r). See the constructor.
         private readonly float[,] _table;
         private readonly double _tx0, _tr0, _tStep;
@@ -209,6 +234,15 @@ namespace AerospikeCE
         /// Distance to the nearest edge; the sign from a separate crossing
         /// count, because a nearest-edge normal test gets corners wrong and
         /// corners are most of this profile.
+        ///
+        /// Edges lying on the axis are not surfaces and are skipped. A profile
+        /// that closes on r = 0 carries one -- the centrebody runs three
+        /// millimetres down the axis, from the middle of the truncation face
+        /// to the apex of its cavity -- and revolving it sweeps no area at
+        /// all. Measured as an edge it puts the zero level set down the middle
+        /// of solid metal, and the mesher then renders a zero-width sheet
+        /// along the axis. They cannot affect the crossing count either, both
+        /// endpoints sitting at the same radius.
         /// </summary>
         private double PolygonDistanceExact(double px, double pr)
         {
@@ -218,6 +252,8 @@ namespace AerospikeCE
             for (int i = 0; i < n; i++)
             {
                 int j = (i + 1) % n;
+                if (_pr[i] <= AxisEpsMm && _pr[j] <= AxisEpsMm)
+                    continue;
                 double ex = _px[j] - _px[i], er = _pr[j] - _pr[i];
                 double ll = Math.Max(ex * ex + er * er, 1e-30);
                 double wx = px - _px[i], wr = pr - _pr[i];
@@ -382,7 +418,7 @@ namespace AerospikeCE
             foreach (var c in _channels) d = Math.Max(d, -ChannelDistance(x, r, th, c));
             foreach (var pt in _ports) d = Math.Max(d, -PortDistance(x, r, th, pt));
             foreach (var h in _holes) d = Math.Max(d, -HoleDistance(x, y, z, h));
-            return (float)d;
+            return (float)(d - SurfaceBiasMm);
         }
     }
 }
