@@ -460,7 +460,11 @@ def write_3mf(path: str, parts: dict, unit: str = "millimeter") -> None:
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
         z.writestr("[Content_Types].xml", content_types)
         z.writestr("_rels/.rels", rels)
-        with z.open("3D/3dmodel.model", "w") as w:
+        # force_zip64 because the member, uncompressed, is past 4 GB: this
+        # engine is 36 million triangles and 3MF spells each one out in XML.
+        # Without it zipfile gets to the end of a fifteen-minute build and
+        # refuses to close the archive.
+        with z.open("3D/3dmodel.model", "w", force_zip64=True) as w:
             emit(w)
 
 
