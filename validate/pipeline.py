@@ -1,5 +1,5 @@
 """
-The verification pipeline. One entry point, four stages, nothing optional.
+The verification pipeline. One entry point, five stages, nothing optional.
 
     python pipeline.py                                  # every stage, screening depth
     python pipeline.py --depth print                    # at the voxel the part ships at
@@ -19,16 +19,19 @@ above it and obvious to the stage below, and there was no stage below.
 So the gates are ordered the way the failure propagates, and each stage is only
 meaningful if the one before it passed:
 
-    physics     the numbers. A wrong throat area is a wrong engine, and no
-                amount of mesh checking will say so.
-    geometry    the shapes those numbers imply, and the seam the C# reads.
-                A channel that leaves its wall is a geometry failure that the
-                physics cannot see and the mesh will report as a strange genus.
-    watertight  the solid those shapes close into. Boundary edges, pinches,
-                loose fragments, cavities with no way out.
-    slicing     what a slicer needs and a topologist does not: an area on every
-                triangle, one triangle per place, a consistent winding, a
-                declared unit. This stage is the one that was missing.
+    physics       the numbers. A wrong throat area is a wrong engine, and no
+                  amount of mesh checking will say so.
+    geometry      the shapes those numbers imply, and the seam the C# reads. A
+                  channel that leaves its wall is a geometry failure the
+                  physics cannot see and the mesh reports as a strange genus.
+    printability  whether a machine can build those shapes at all. A support
+                  inside a sealed cavity stays there for ever, and no amount of
+                  mesh checking has an opinion about that either.
+    watertight    the solid those shapes close into. Boundary edges, pinches,
+                  loose fragments, cavities with no way out.
+    slicing       what a slicer needs and a topologist does not: an area on
+                  every triangle, one triangle per place, a consistent winding,
+                  a declared unit. This stage is the one that was missing.
 
 Depth
 -----
@@ -60,6 +63,7 @@ from engine_design import design_engine
 from mesh_export import (manifold_report, mesh_area, mesh_volume, read_3mf,
                          slicing_report)
 from mesh_solid import build_mesh_streaming
+from printability_ref import choose_build_direction
 from print_ready import features_for, surfaces
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -82,9 +86,11 @@ TEST_MODULES = {
         "test_manifolds.py",        # plenums, collectors, the head joint
         "test_interfaces.py",       # ports, bosses, what connects where
         "test_feed_paths.py",       # every circuit reaching what feeds it
-        "test_printability.py",     # overhangs, bridges, drainage, build direction
         "test_cooled_geometry.py",  # the features on the part, and the lattice
         "test_build_plan.py",       # the seam: shapes only, no physics
+    ],
+    "printability": [
+        "test_printability.py",     # overhangs, bridges, drainage, build direction
     ],
     "watertight": [
         "test_mesh.py",             # closure, topology, volume, the slicing gate
@@ -337,7 +343,47 @@ def check_the_reader_compiles(st: Stage) -> None:
 
 
 # --------------------------------------------------------------------------
-# stages 3 and 4: the solid, and what a slicer makes of it
+# stage 3: can a machine build it
+# --------------------------------------------------------------------------
+
+def stage_printability(design) -> Stage:
+    """
+    Buildable, in the orientation the model derives rather than one chosen.
+
+    Supportable is not the same as printable, and the difference is the whole
+    stage. An overhang on an outer surface takes a support that gets broken off
+    afterwards; an overhang inside a sealed cavity takes one that stays there
+    for ever, because nothing can reach in to remove it. `printability_ref`
+    casts a ray down the build direction and asks whether a support column
+    could actually get to the facet, so the two are counted separately: the
+    unsupportable ones are defects and the rest are a finishing operation.
+    """
+    st = Stage("printability")
+    run_tests(st, TEST_MODULES["printability"])
+
+    best, up, down = choose_build_direction(design)
+    other = down if best is up else up
+    st.add("build direction is derived", best.build_direction in ("+x", "-x"),
+           f"{best.build_direction}: {len(best.findings)} findings against "
+           f"{len(other.findings)} the other way up")
+    st.add("fits the build envelope", best.envelope_ok,
+           f"{best.height_mm:.0f} mm tall, {best.diameter_mm:.0f} mm across")
+    st.add("nothing unsupportable", not best.unsupportable,
+           f"{len(best.unsupportable)} facet(s) a support column cannot reach"
+           if best.unsupportable else
+           f"{len(best.needs_support)} overhang(s) need removable support, all "
+           f"reachable from the plate")
+    for kind in ("feature", "drainage", "envelope"):
+        found = best.of_kind(kind)
+        st.add(f"no {kind} finding", not found,
+               "clear" if not found else "; ".join(f.detail for f in found[:3]))
+    st.add("printable as it stands", best.printable,
+           best.notes[-1] if best.notes else "no notes")
+    return st
+
+
+# --------------------------------------------------------------------------
+# stages 4 and 5: the solid, and what a slicer makes of it
 # --------------------------------------------------------------------------
 
 def mesh_parts(design, voxel_mm: float, verbose: bool = True):
@@ -563,6 +609,8 @@ def main() -> int:
             st = stage_physics(design, spec)
         elif name == "geometry":
             st = stage_geometry(design, spec)
+        elif name == "printability":
+            st = stage_printability(design)
         elif name == "watertight":
             if parts is None:
                 parts, fields = mesh_parts(design, voxel)

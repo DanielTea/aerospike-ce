@@ -9,11 +9,11 @@ anything. Read this before making changes.
 **You cannot see the geometry.** The PicoGK viewer is invisible to you. Never
 claim a part "looks right". Verify through the channels you actually have:
 
-1. `validate/pipeline.py` — the gate. Four stages, in the order a failure
-   propagates: **physics**, **geometry**, **watertight**, **slicing**. Every
-   test module in the repo belongs to exactly one of them and the pipeline
-   refuses to run if one belongs to none. `docs/pipeline/README.md` lists every
-   gate and what it catches.
+1. `validate/pipeline.py` — the gate. Five stages, in the order a failure
+   propagates: **physics**, **geometry**, **printability**, **watertight**,
+   **slicing**. Every test module in the repo belongs to exactly one of them
+   and the pipeline refuses to run if one belongs to none.
+   `docs/pipeline/README.md` lists every gate and what it catches.
 2. `out/contour.png`, `out/engine.png`, `out/engine_3d.png` — rendered plots you
    can read with your image tools.
 3. `validate/verify_print_file.py` — reopens a written 3MF as a stranger would

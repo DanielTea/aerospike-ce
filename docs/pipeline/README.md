@@ -1,6 +1,6 @@
 # The verification pipeline
 
-One entry point. Four stages. Every test in the repository belongs to exactly
+One entry point. Five stages. Every test in the repository belongs to exactly
 one of them, and the pipeline refuses to run if a test module belongs to none.
 
 ```bash
@@ -27,7 +27,8 @@ actually shipped from this repository was downstream of a green suite:
 | 27 cm3 of copper attached to nothing inside the cowl | watertight — two positive-volume surfaces |
 | injector orifices that stopped reaching their plenum | watertight — a sealed void |
 | 6,334 zero-area triangles in a published file | slicing — a triangle with no normal |
-| one pinch point in 24 million triangles | slicing — the surface meeting itself |
+| one pinch point in 24 million triangles | watertight caught it and could not say what it was — "not watertight, zero boundary edges"; slicing names it, and the Euler parity proves it |
+| a constant-thickness hollow that narrows as it rises | printability — a support inside a sealed cavity that nothing can reach |
 
 Each was invisible to the stage above it and obvious to the stage below, and
 until now there was no stage below. So the gates run in the order the failure
@@ -71,7 +72,31 @@ Runs `test_engine`, `test_shell`, `test_manifolds`, `test_interfaces`,
 | plan round-trips | it survives JSON exactly, which is how the C# receives it |
 | the C# reader compiles | the other side of the seam still builds. Skipped, out loud, when the SDK or the vendored PicoGK is not on the machine -- a gate that quietly disappears is worse than one that was never there |
 
-## Stage 3 — watertight
+## Stage 3 — printability
+
+Whether a machine can build those shapes at all. Cheap -- it works on the
+profiles and the features, with no mesh -- so it runs before the expensive
+stages: a part nobody can build is wrong whether or not its mesh closes.
+
+Runs `test_printability`, then, in the orientation the model derives rather
+than one chosen:
+
+| gate | what it proves |
+|---|---|
+| build direction is derived | both orientations are analysed and the better one is reported with the evidence. Building +x gives 24 findings; the other way up gives 174 |
+| fits the build envelope | height and diameter against the process |
+| nothing unsupportable | **the gate that matters.** A ray is cast down the build direction to ask whether a support column could actually reach each overhanging facet. The ones it can reach cost support material and a finishing operation; the ones it cannot are defects, because a support inside a sealed cavity stays there for ever |
+| no feature / drainage / envelope finding | nothing under the process's minimum feature, no void powder cannot get out of, nothing outside the machine |
+| printable as it stands | all of the above together |
+
+Supportable is not the same as printable, and treating the two alike either
+rejects every printable engine or accepts an unbuildable one. It is also why
+the centrebody cavity closes on the axis in a cone: a constant-thickness offset
+of the spike is the obvious hollowing and it is unbuildable, because an
+internal void that narrows as it rises hangs material over nothing and there is
+no way in to support it.
+
+## Stage 4 — watertight
 
 The solid those shapes close into.
 
@@ -94,7 +119,7 @@ the voxel. A percentage is not comparable between a solid disc and a part with
 392 channels in it, and a real loss — a dropped slab, a region meshed inside
 out — is a whole feature, orders above the bound either way.
 
-## Stage 4 — slicing
+## Stage 5 — slicing
 
 What a slicer reads and a topologist never looks at. This is the stage that was
 missing, and every check in it passes `manifold_report` unharmed.

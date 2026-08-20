@@ -291,7 +291,14 @@ def main() -> None:
     bad = []
     for part, _, r, _ in reports:
         if not r["watertight"]:
-            bad.append(f"{part} is not watertight ({r['boundary_edges']} boundary edges)")
+            # Say which. "Not watertight, zero boundary edges" is a true
+            # sentence that tells you nothing, and it cost a whole session
+            # once: the mesh had no hole in it, it had a pinch.
+            bad.append(f"{part} is not watertight: {r['boundary_edges']} "
+                       f"boundary edge(s), {r['nonmanifold_edges']} edge(s) in "
+                       f"more than two triangles"
+                       + ("  (a hole)" if r["boundary_edges"] else
+                          "  (no hole: the surface meets itself)"))
         if r["sealed"]:
             trapped = sum(abs(v) for v in r["sealed"]) / 1000.0
             bad.append(f"{part} has {len(r['sealed'])} sealed void(s) holding "

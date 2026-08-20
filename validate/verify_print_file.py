@@ -65,7 +65,11 @@ def main() -> int:
               f"{rep['nonmanifold_vertices']:6d} {rep['inconsistent_edges']:6d} "
               f"{vol / 1000:11.2f} {mass:8.3f}")
         if not rep["watertight"]:
-            bad.append(f"{name}: {rep['boundary_edges']} boundary edges")
+            bad.append(f"{name}: {rep['boundary_edges']} boundary edge(s), "
+                       f"{rep['nonmanifold_edges']} edge(s) in more than two "
+                       f"triangles"
+                       + ("" if rep["boundary_edges"] else
+                          "  (no hole: the surface meets itself)"))
         if sealed:
             bad.append(f"{name}: {len(sealed)} sealed void(s)")
         if loose:

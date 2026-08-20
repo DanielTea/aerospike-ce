@@ -103,10 +103,11 @@ The viewer window opens, STLs land in `out/`.
 edit spec/demo.json
         |
         v
-python pipeline.py                  ->  physics    the numbers
-                                        geometry   the shapes, and the seam
-                                        watertight the solid they close into
-                                        slicing    what a slicer reads
+python pipeline.py                  ->  physics       the numbers
+                                        geometry      the shapes, and the seam
+                                        printability  can a machine build them
+                                        watertight    the solid they close into
+                                        slicing       what a slicer reads
         |
         v
 python plot_contour.py              ->  out/contour.png     <- look at this
