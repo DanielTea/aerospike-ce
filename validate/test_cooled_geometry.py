@@ -215,14 +215,22 @@ def test_head_meshes_with_exactly_the_right_topology(design):
     is something both the mesher and a hand calculation can state independently.
     """
     from mesh_export import manifold_report, mesh_volume
-    from mesh_solid import build_mesh, injector_holes
+    from mesh_solid import build_mesh
     from manifold_ref import design_manifolds, geometry_features
 
-    a, inj = design.assembly, design.injector
+    a = design.assembly
     gf = geometry_features(design, design_manifolds(design))
-    holes = injector_holes(a, inj) + list(gf["head"]["holes"])
+    # geometry_features already carries the orifices, and it is the only thing
+    # that knows where the plenums ended up. Adding injector_holes on top put a
+    # second set of orifices in the disc at a different, wrong depth.
+    holes = list(gf["head"]["holes"])
 
-    plain = build_mesh(a.profiles["head"], voxel_mm=0.4)
+    # Isolated against the same part with the plenums left out, rather than
+    # against the bare disc. The lugs add about 320 cm3 and the plenums now
+    # remove about 80, so a net comparison against the bare disc says the
+    # features "added material" and tests nothing about the plenums at all.
+    without = build_mesh(a.profiles["head"], voxel_mm=0.4, holes=holes,
+                         lugs=gf["head"]["lugs"])
     with_features = build_mesh(a.profiles["head"], voxel_mm=0.4, holes=holes,
                                lugs=gf["head"]["lugs"],
                                plenums=gf["head"]["plenums"])
@@ -231,16 +239,16 @@ def test_head_meshes_with_exactly_the_right_topology(design):
     assert rep["watertight"]
     assert rep["boundary_edges"] == 0
 
-    v_plain = mesh_volume(*plain)
-    v_feat = mesh_volume(*with_features)
-
-    # the plenums alone remove a known volume: a diamond ring, 2*a*b in section
-    removed = sum(2.0 * p.half_x * p.half_r * 2.0 * math.pi
+    # Pappus: the section swept about the axis at its centroid radius. The
+    # section is the filleted one -- a sharp diamond is neither printable nor
+    # meshable at its apex -- so the area is 3 percent under the nominal 2ab.
+    from mesh_solid import plenum_section_area_mm2
+    removed = sum(plenum_section_area_mm2(p.half_x, p.half_r) * 2.0 * math.pi
                   * (p.r_inner + p.half_r) for p in gf["head"]["plenums"])
-    # lugs add material, so the net is bounded rather than equal
-    assert v_feat < v_plain, "features removed nothing"
-    assert removed > 0.5 * (v_plain - v_feat), (
-        "plenums should dominate what the features remove")
+    measured = mesh_volume(*without) - mesh_volume(*with_features)
+    assert measured == pytest.approx(removed, rel=0.03), (
+        f"plenums removed {measured / 1000:.1f} cm3, the section and radius "
+        f"say {removed / 1000:.1f} cm3")
 
 
 def test_injector_orifices_reach_their_plenum(design):
@@ -248,16 +256,69 @@ def test_injector_orifices_reach_their_plenum(design):
     A hole that stops short of the manifold feeds nothing, and nothing in a
     watertightness or topology check would notice.
     """
-    from mesh_solid import injector_holes
-    from manifold_ref import design_manifolds, geometry_features
+    from manifold_ref import design_manifolds, geometry_features, plenum_feeding
 
-    a = design.assembly
     md = design_manifolds(design)
-    holes = injector_holes(a, design.injector)
-    fed = [p for p in md.plenums if p.name != "cowl_inlet_ring"]
+    # Through geometry_features, which is what the build calls. Asking
+    # injector_holes directly tests a placement nothing uses.
+    holes = [h for h in geometry_features(design, md)["head"]["holes"]
+             if h.name.endswith("orifice")]
+    assert holes
+
+    # At the orifice's own radius, not at the plenum's extreme tip. The section
+    # is a diamond: it reaches furthest aft at its centre radius and less
+    # everywhere else, so measuring at the tip said "connected" while the two
+    # were five millimetres apart.
+    want = {"fuel_orifice": "head_fuel_manifold", "ox_orifice": "ox_dome"}
     for h in holes:
-        assert any(p.x_mm + p.half_x_mm >= h.x_start - 1e-6 for p in fed), (
-            f"orifice starting at x={h.x_start:.1f} reaches no plenum")
+        fed = plenum_feeding(md, h.radius_mm)
+        assert fed is not None, (
+            f"{h.name} at r={h.radius_mm:.1f} opens into no plenum at all")
+        assert fed.name == want[h.name], (
+            f"{h.name} at r={h.radius_mm:.1f} opens into {fed.name}, "
+            f"not {want[h.name]} -- that crosses the propellants")
+        aft = fed.x_mm + fed.half_x_at(h.radius_mm)
+        assert h.x_start < aft - 1e-9, (
+            f"{h.name} starts at x={h.x_start:.2f}, aft of the plenum face at "
+            f"x={aft:.2f}; it would open into solid metal")
+
+
+def test_the_two_head_plenums_never_touch(design):
+    """
+    A fuel manifold and an oxidiser dome that meet are not a geometry bug, they
+    are a fire. Nothing else in the model checks this: both are voids, so the
+    union of them is watertight, drains, and looks entirely reasonable.
+    """
+    from manifold_ref import design_manifolds
+
+    md = design_manifolds(design)
+    heads = [p for p in md.plenums if p.name != "cowl_inlet_ring"]
+    for i, a in enumerate(heads):
+        for b in heads[i + 1:]:
+            gap = max(a.r_inner_mm, b.r_inner_mm) - min(
+                a.r_inner_mm + 2 * a.half_r_mm, b.r_inner_mm + 2 * b.half_r_mm)
+            axial = abs(a.x_mm - b.x_mm) - (a.half_x_mm + b.half_x_mm)
+            assert gap > 0.0 or axial > 0.0, (
+                f"{a.name} and {b.name} intersect: radial overlap "
+                f"{-gap:.2f} mm, axial overlap {-axial:.2f} mm")
+
+
+def test_each_head_plenum_surrounds_the_ring_it_feeds(design):
+    """
+    A plenum exists to feed one ring of orifices, so the ring has to be inside
+    it -- and far enough inside that the section is genuinely open there, not
+    grazing an edge where the diamond has tapered to nothing.
+    """
+    from manifold_ref import design_manifolds
+
+    md = design_manifolds(design)
+    inj = design.injector
+    for name, radius in (("head_fuel_manifold", inj.fuel_ring_radius * 1e3),
+                         ("ox_dome", inj.ox_ring_radius * 1e3)):
+        p = next(q for q in md.plenums if q.name == name)
+        assert p.reaches(radius, depth_mm=1.0), (
+            f"{name} is only {2 * p.half_x_at(radius):.2f} mm deep at "
+            f"r={radius:.1f} mm, where its orifices have to meet it")
 
 
 def test_orifices_stay_drillable(design):
@@ -265,6 +326,49 @@ def test_orifices_stay_drillable(design):
     Once the head was thickened for its manifolds, a hole through the whole
     block became 25:1. Nothing prints or drills that straight.
     """
-    from mesh_solid import injector_holes
-    for h in injector_holes(design.assembly, design.injector):
-        assert (h.x_end - h.x_start) / h.diameter_mm < 12.0
+    from manifold_ref import design_manifolds, geometry_features
+    for h in geometry_features(design, design_manifolds(design))["head"]["holes"]:
+        if h.name.endswith("orifice"):
+            assert (h.x_end - h.x_start) / h.diameter_mm < 12.0
+
+
+def test_the_head_gets_each_hole_ring_exactly_once(design):
+    """
+    Orifice placement moved to geometry_features because it depends on where
+    the plenums ended up. Both build_plan and print_ready also generated them
+    from a fixed offset, so the disc briefly had two sets of orifices in
+    different places -- watertight, plausible, and wrong.
+    """
+    from manifold_ref import design_manifolds, geometry_features
+    from build_plan import build_plan
+    import collections
+
+    holes = geometry_features(design, design_manifolds(design))["head"]["holes"]
+    assert collections.Counter(h.name for h in holes) == {
+        "fuel_orifice": 1, "ox_orifice": 1, "mount_hole": 1}
+
+    planned = build_plan(design.spec, design)["parts"]["head"]["holes"]
+    assert collections.Counter(h["name"] for h in planned) == {
+        "fuel_orifice": 1, "ox_orifice": 1, "mount_hole": 1}
+
+
+def test_the_head_has_exactly_the_handles_its_features_imply(design):
+    """
+    Genus counted two ways: off the mesh, and off the feature list.
+
+    This is the check that says every orifice is a through-feature and every
+    cavity is connected. A blind orifice adds no handle, so it shows up here as
+    a genus one short -- while the part stays watertight, drains, and looks
+    entirely correct. 1 bore + 48 + 48 + 4 mounting holes = 101.
+    """
+    from export_cooled import expected_genus
+    from mesh_solid import build_mesh
+    from print_ready import check, features_for
+
+    v, f = build_mesh(design.assembly.profiles["head"], voxel_mm=0.4,
+                      **features_for(design, "head"))
+    rep = check(v, f, "head")
+    assert rep["watertight"]
+    assert rep["nonmanifold_edges"] == 0
+    assert rep["surfaces"] == 1, "a plenum has sealed itself off"
+    assert rep["genus"] == expected_genus("head", design)

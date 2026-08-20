@@ -52,13 +52,22 @@ from mesh_solid import (
 
 def expected_genus(part: str, design) -> int:
     """
-    Genus the head disc should have: one handle per injector orifice on top of
-    the bored disc's own. The channelled parts are not predicted here; see the
-    module docstring on why their topology is reported rather than asserted.
+    Genus the head disc should have, counted from the features.
+
+    One handle for the central bore. One per injector orifice: a plenum is a
+    ring cavity, so with n orifices into it the pair contributes (n - 1) tunnels
+    plus the ring's own handle, which is n. One per mounting hole through the
+    lugs.
+
+    The channelled parts are not predicted here; see the module docstring on why
+    their topology is reported rather than asserted.
     """
-    if part == "head":
-        return 1 + (2 * design.injector.n_elements if design.injector else 0)
-    return -1
+    if part != "head":
+        return -1
+    from manifold_ref import design_manifolds
+    n = 2 * design.injector.n_elements if design.injector else 0
+    lugs = design_manifolds(design).lugs
+    return 1 + n + (lugs.count if lugs is not None else 0)
 
 
 def components(verts, faces) -> int:

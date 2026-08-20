@@ -171,3 +171,91 @@ def test_assembly_volume_is_the_sum_of_its_parts(engine, tmp_path):
     rep = export_assembly(engine, str(tmp_path), name="t", n_theta=90)
     parts = sum(r["mesh_volume_mm3"] for k, r in rep.items() if k != "assembly")
     assert rep["assembly"]["mesh_volume_mm3"] == pytest.approx(parts, rel=1e-9)
+
+
+# --------------------------------------------------------------------------
+# 3MF, the format the print file is actually written in
+# --------------------------------------------------------------------------
+
+def _two_parts():
+    """A tetrahedron and a translated copy, as two named solids."""
+    v = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0],
+                  [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]])
+    f = np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]], dtype=np.int64)
+    return {"first": (v, f), "second": (v + np.array([25.0, 0.0, 0.0]), f)}
+
+
+def test_3mf_round_trips_exactly(tmp_path):
+    """
+    Both the writer and the reader stream, because a whole engine is about a
+    gigabyte of XML. Streaming is where an off-by-one in the vertex indices or
+    a dropped chunk boundary would hide, and either produces a file that opens
+    cleanly and is not the part.
+    """
+    from mesh_export import read_3mf, write_3mf
+
+    parts = _two_parts()
+    p = tmp_path / "two.3mf"
+    write_3mf(str(p), parts)
+    back = read_3mf(str(p))
+
+    assert back["unit"] == "millimeter"
+    assert set(back["objects"]) == set(parts)
+    for name, (v, f) in parts.items():
+        v2, f2 = back["objects"][name]
+        assert np.allclose(v2, v, atol=1e-4)
+        assert np.array_equal(f2, f)
+
+
+def test_3mf_survives_a_chunk_boundary(tmp_path):
+    """
+    The writer emits in 65536-element blocks. A mesh larger than one block is
+    the case that exercises the seam; a tetrahedron never would.
+    """
+    from mesh_export import read_3mf, write_3mf
+
+    n = 70000
+    rng = np.random.default_rng(0)
+    v = rng.normal(size=(n, 3)) * 10.0
+    f = np.arange(3 * (n // 3), dtype=np.int64).reshape(-1, 3)
+    p = tmp_path / "big.3mf"
+    write_3mf(str(p), {"slab": (v, f)})
+    v2, f2 = read_3mf(str(p))["objects"]["slab"]
+
+    assert len(v2) == n
+    assert np.array_equal(f2, f)
+    assert np.allclose(v2, v, atol=1e-4)
+
+
+def test_3mf_is_a_well_formed_package(tmp_path):
+    """The three members a 3MF reader looks for, and the relationship between."""
+    import zipfile
+
+    from mesh_export import write_3mf
+
+    p = tmp_path / "pkg.3mf"
+    write_3mf(str(p), _two_parts())
+    with zipfile.ZipFile(p) as z:
+        names = set(z.namelist())
+        assert {"[Content_Types].xml", "_rels/.rels", "3D/3dmodel.model"} <= names
+        rels = z.read("_rels/.rels").decode()
+        assert "/3D/3dmodel.model" in rels
+        model = z.read("3D/3dmodel.model").decode()
+    # every object is placed in the build, or a slicer opens an empty plate
+    assert model.count("<item objectid=") == 2
+
+
+def test_3mf_states_millimetres(tmp_path):
+    """
+    STL carries no unit and every slicer guesses. The guess is usually right,
+    which is not the same as being told -- a part that silently arrives at a
+    twenty-fifth of its size is a wasted build.
+    """
+    import zipfile
+
+    from mesh_export import write_3mf
+
+    p = tmp_path / "unit.3mf"
+    write_3mf(str(p), _two_parts())
+    with zipfile.ZipFile(p) as z:
+        assert 'unit="millimeter"' in z.read("3D/3dmodel.model").decode()

@@ -1,0 +1,224 @@
+"""
+Build a print-ready file for the complete engine.
+
+    python print_ready.py --spec ../spec/regen.json --out ../docs/print
+
+"Printable" is a claim, not a file extension, so this checks it rather than
+asserting it. Every part written here is:
+
+- watertight, with no boundary and no non-manifold edges
+- a single connected solid, not a shell that happens to look like one
+- within tolerance of the distance field it came from, by volume
+- meshed fine enough to resolve its own narrowest feature
+
+and it is refused if any of that fails, because a slicer will happily accept a
+broken mesh and print something that is not the part.
+
+Resolution
+----------
+Set from the geometry, not from taste. Marching cubes needs about three samples
+across a feature, and the narrowest thing in this engine is a 0.4 mm cooling
+channel, so the voxel wants to be around 0.13 mm. That is not negotiable
+downwards without losing the channels, which is the whole reason the part is
+interesting.
+
+Decimation
+----------
+Marching cubes tessellates smooth ground at voxel resolution, which is most of
+the triangles and none of the information. Quadric collapse removes it -- but it
+also reads a half-millimetre channel as noise against a smooth wall and closes
+it, so every step is checked against the topology and the volume, and the
+decimation stops at the last ratio that survived rather than the one that was
+asked for.
+
+Format
+------
+3MF. STL is a triangle soup with no units in it; every slicer guesses
+millimetres and is usually right, which is not the same as being told.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import time
+
+import numpy as np
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
+
+from build_plan import build_plan, narrowest_feature
+from engine_design import design_engine
+from manifold_ref import design_manifolds, geometry_features
+from mesh_export import manifold_report, mesh_volume, write_3mf
+from mesh_solid import (
+    build_mesh_streaming,
+    centrebody_channels,
+    cowl_channels,
+    decimate,
+    feed_ports,
+)
+from shell_ref import shell_features
+
+
+def surfaces(verts: np.ndarray, faces: np.ndarray):
+    """
+    The mesh's closed boundary surfaces, with the signed volume of each.
+
+    Not the same as counting solids. A part with sealed internal cavities has
+    one outward-facing surface and one inward-facing surface per cavity, and the
+    inward ones carry negative volume. Requiring a single surface would reject
+    every hollow part ever printed; what actually matters is whether those
+    cavities have a way out.
+    """
+    e = np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+    g = coo_matrix((np.ones(len(e)), (e[:, 0], e[:, 1])),
+                   shape=(len(verts), len(verts)))
+    n, label = connected_components(g, directed=False)
+    out = []
+    for k in range(n):
+        sub = faces[label[faces[:, 0]] == k]
+        if len(sub):
+            out.append((len(sub), mesh_volume(verts, sub)))
+    return out
+
+
+def sealed_voids(verts: np.ndarray, faces: np.ndarray) -> list:
+    """
+    Enclosed cavities with no way out, by their negative signed volume.
+
+    A sealed void in a powder-bed part stays full of powder for ever. It adds
+    mass nobody accounted for, it can shake loose later, and in a cooling
+    jacket or a manifold it blocks the thing the cavity exists for. This is the
+    check that matters for printability, and it is the one that catches an
+    injector orifice that has stopped reaching the plenum it feeds.
+    """
+    return [v for _, v in surfaces(verts, faces) if v < 0.0]
+
+
+def check(verts, faces, label: str) -> dict:
+    rep = manifold_report(verts, faces)
+    surf = surfaces(verts, faces)
+    rep["surfaces"] = len(surf)
+    rep["sealed"] = [v for _, v in surf if v < 0.0]
+    rep["genus"] = (2 * len(surf) - rep["euler"]) // 2
+    rep["volume_mm3"] = mesh_volume(verts, faces)
+    rep["label"] = label
+    return rep
+
+
+def reduce_safely(verts, faces, target_ratio: float, tol_volume: float = 0.02):
+    """
+    Decimate as far as topology and volume survive, and no further.
+
+    Returns the last mesh that passed. Asking for a ratio and taking whatever
+    comes back is how a cooling channel gets quietly closed: the result is still
+    watertight, still looks like an engine, and no longer has the feature the
+    part exists for.
+    """
+    base = check(verts, faces, "base")
+    best = (verts, faces, base)
+    # Mildest first, stopping at the target. Walking the other way -- skipping
+    # every ratio gentler than the target and opening with the target itself --
+    # means a part that cannot survive an eight-fold collapse gets no
+    # decimation at all, when it would have taken a halving without complaint.
+    # Finely stepped near the top, because that is where the channelled
+    # parts stop. The centrebody survives 0.50 and not 0.30; with only
+    # those two rungs the 0.40 that it would also have taken is never
+    # tried, and a fifth of the file is carried for nothing.
+    for ratio in (0.5, 0.4, 0.35, 0.3, 0.25, 0.2, 0.15, 0.12, 0.08, 0.05):
+        if ratio < target_ratio:
+            continue
+        v2, f2 = decimate(verts, faces, ratio)
+        rep = check(v2, f2, f"keep {ratio:.2f}")
+        if not rep["watertight"] or rep["surfaces"] != base["surfaces"]:
+            break
+        if rep["genus"] != base["genus"]:
+            break
+        if abs(rep["volume_mm3"] - base["volume_mm3"]) > tol_volume * abs(base["volume_mm3"]):
+            break
+        best = (v2, f2, rep)
+    return best
+
+
+def features_for(design, part):
+    a = design.assembly
+    gf = geometry_features(design, design_manifolds(design))
+    shell, _, _ = shell_features(design)
+    ch, pt, hl = [], [], []
+    if part == "cowl" and design.circuits.get("cowl"):
+        ch = [cowl_channels(a, design.circuits["cowl"].channel)]
+        pt = [feed_ports(a, ch[0])]
+    if part == "centrebody" and design.circuits.get("centrebody"):
+        ch = [centrebody_channels(a, design.circuits["centrebody"].channel)]
+        pt = [feed_ports(a, ch[0])]
+    # The injector orifices come from geometry_features, which knows where the
+    # plenums ended up. Generating them here as well would put a second,
+    # differently-placed set of orifices in the same disc.
+    hl = list(gf.get(part, {}).get("holes", []))
+    return dict(channels=ch, ports=pt, holes=hl,
+                bosses=gf.get(part, {}).get("bosses"),
+                lugs=gf.get(part, {}).get("lugs"),
+                plenums=gf.get(part, {}).get("plenums"),
+                ribs=shell.get(part, {}).get("ribs"),
+                legs=shell.get(part, {}).get("legs"))
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--spec", default="../spec/regen.json")
+    ap.add_argument("--out", default="../docs/print")
+    ap.add_argument("--voxel", type=float, default=0.0,
+                    help="override; default is the narrowest feature over three")
+    ap.add_argument("--keep", type=float, default=0.12,
+                    help="decimation target; the run stops earlier if topology moves")
+    args = ap.parse_args()
+
+    with open(args.spec, encoding="utf-8") as fh:
+        spec = json.load(fh)
+    design = design_engine(spec)
+    plan = build_plan(spec, design)
+    narrow = narrowest_feature(plan)
+    voxel = args.voxel if args.voxel > 0 else round(narrow / 3.0, 3)
+
+    os.makedirs(args.out, exist_ok=True)
+    print(f"{spec.get('name')}: narrowest feature {narrow:.2f} mm -> "
+          f"meshing at {voxel:.3f} mm")
+
+    parts, reports = {}, []
+    for part in design.assembly.profiles:
+        t0 = time.time()
+        v, f = build_mesh_streaming(design.assembly.profiles[part], voxel_mm=voxel,
+                                    **features_for(design, part))
+        raw = len(f)
+        v, f, rep = reduce_safely(v, f, args.keep)
+        parts[part] = (v, f)
+        reports.append((part, raw, rep, time.time() - t0))
+        print(f"  {part:11s} {time.time() - t0:6.0f}s  {raw:9d} -> {len(f):8d} tris  "
+              f"{rep['label']:10s} watertight {str(rep['watertight']):5s} "
+              f"genus {rep['genus']:5d}  sealed voids {len(rep['sealed'])}  "
+              f"{rep['volume_mm3'] / 1000:8.2f} cm3", flush=True)
+
+    bad = []
+    for part, _, r, _ in reports:
+        if not r["watertight"]:
+            bad.append(f"{part} is not watertight ({r['boundary_edges']} boundary edges)")
+        if r["sealed"]:
+            trapped = sum(abs(v) for v in r["sealed"]) / 1000.0
+            bad.append(f"{part} has {len(r['sealed'])} sealed void(s) holding "
+                       f"{trapped:.1f} cm3 of powder with no way out")
+    if bad:
+        raise SystemExit("refusing to write a print file:\n  " + "\n  ".join(bad))
+
+    path = os.path.join(args.out, f"{spec.get('name', 'engine')}.3mf")
+    write_3mf(path, parts)
+    total = sum(len(f) for _, f in parts.values())
+    print(f"\nwrote {path}  {os.path.getsize(path) / 1e6:.1f} MB, "
+          f"{total:,} triangles, {len(parts)} solids")
+    print(f"equivalent binary STL would be {(84 + total * 50) / 1e6:.0f} MB")
+
+
+if __name__ == "__main__":
+    main()

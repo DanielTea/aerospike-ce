@@ -94,6 +94,8 @@ the two is the failure mode this structure exists to prevent.
 | `validate/plot_engine.py` | assembly PNG + area schedule | your eyes on the engine |
 | `validate/plot_cooled.py` | section views through the field | your eyes on the channels |
 | `validate/export_cooled.py` | cooled STLs + topology check | |
+| `validate/print_ready.py` | the checked print file | refuses rather than writes |
+| `validate/verify_print_file.py` | reopens a written 3MF and re-derives everything | checks the writer, not the mesher |
 | `validate/build_plan.py` | writes the plan C# reads | the seam; shapes only |
 | `model/BuildPlan.cs` | reads the plan | refuses a version it does not know |
 | `model/CooledGeometry.cs` | SDFs for every feature | mirror of `mesh_solid.py` |
@@ -169,6 +171,28 @@ resolve. `export_cooled.py` derives the voxel size from the narrowest feature,
 checks the Euler characteristic against what the features imply, and only
 decimates as far as the topology survives -- pushed further, quadric collapse
 closes a cooling channel and leaves a mesh that still looks perfectly fine.
+
+## A print file is a claim, and it gets checked
+
+`print_ready.py` writes 3MF, not STL: STL is a triangle soup with no units in
+it, and every slicer guessing millimetres correctly is not the same as being
+told. It refuses to write at all unless every part is watertight and no part has
+a sealed void.
+
+Sealed voids, not component counts. A part with internal cavities is not broken
+-- the head disc is one solid plus two plenum surfaces, and those cavity
+surfaces carry *negative* volume, so counting connected components rejects every
+hollow part ever printed. What is actually broken is a cavity with no way out,
+because it stays full of powder for ever. That check is what caught the injector
+orifices no longer reaching their plenums after the manifolds were resized.
+
+Two things that looked like geometry bugs and were not:
+
+- Several hundred "sealed voids" in the cowl at a 0.7 mm test voxel. The channel
+  is 0.8 mm wide. Testing a part below its own resolution floor shreds the
+  channels into fragments and reports every fragment. Check the voxel before
+  believing the finding.
+- The head reporting three "components". One solid, two cavity surfaces.
 
 ## Voxel resolution
 

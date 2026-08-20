@@ -10,3 +10,6 @@ venv/
 
 # Dear ImGui window layout, written by the PicoGK viewer on first run
 imgui.ini
+
+# macOS Finder metadata
+.DS_Store

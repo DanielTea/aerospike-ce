@@ -185,7 +185,10 @@ def test_the_plenum_sits_inside_its_boss(design, manifolds):
 def test_lug_holes_line_up_with_the_lugs(design, manifolds):
     gf = geometry_features(design, manifolds)
     lug = gf["head"]["lugs"][0]
-    hole = gf["head"]["holes"][0]
+    # By name, not by index. The head disc carries injector orifices in the
+    # same list, and picking [0] silently tested whichever happened to be
+    # appended first.
+    hole = next(h for h in gf["head"]["holes"] if h.name == "mount_hole")
     assert hole.count == lug.count
     assert hole.phase == pytest.approx(lug.phase)
     assert lug.r_inner < hole.radius_mm < lug.r_outer

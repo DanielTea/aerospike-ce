@@ -25,7 +25,7 @@
     "wall_thickness_mm": 3.0,
     "lip_thickness_mm": 1.0,
     "base_cap_thickness_mm": 4.0,
-    "head_thickness_mm": 36.0,
+    "head_thickness_mm": 46.0,
     "flange_width_mm": 22.0
   },
 
@@ -69,10 +69,10 @@
 
   "cooling": {
     "materials": ["grcop42", "inconel718"],
-    "min_channel_width_mm": 0.4,
+    "min_channel_width_mm": 0.7,
     "min_hot_wall_mm": 0.7,
     "max_pressure_drop_fraction": 0.5,
-    "comment": "min_hot_wall_mm is the constraint that matters most. Left free the search picks 0.3 mm, because the hot wall is the largest thermal resistance in the stack; a third of a millimetre between 3400 K gas and cryogenic methane is not something a powder-bed machine holds, and it is too thin to inspect. 0.7 mm still leaves over 100 K of margin. The two circuits run in parallel off the fuel feed. The split is NOT an input: engine_design.py measures each circuit's heat load first and divides the fuel in that ratio, because the centrebody carries both the chamber wall and the whole plug surface and an even split starves it."
+    "comment": "min_channel_width_mm is a process floor, not a geometric one. Left at 0.4 mm the search takes it, because a narrower channel runs faster coolant past more surface; but 0.4 mm is below what a powder-bed machine reliably holds and below what an inspection can resolve, and it forces the whole engine to be meshed at 0.13 mm voxels to keep the channel from vanishing. At 0.7 mm the hot wall becomes the binding constraint instead, so nothing further is gained by widening. It costs 170 K of wall temperature (674 K to 844 K, against 1350 K melting) and it returns 1.4 bar of pressure drop. min_hot_wall_mm is the constraint that matters most. Left free the search picks 0.3 mm, because the hot wall is the largest thermal resistance in the stack; a third of a millimetre between 3400 K gas and cryogenic methane is not something a powder-bed machine holds, and it is too thin to inspect. 0.7 mm still leaves over 100 K of margin. The two circuits run in parallel off the fuel feed. The split is NOT an input: engine_design.py measures each circuit's heat load first and divides the fuel in that ratio, because the centrebody carries both the chamber wall and the whole plug surface and an even split starves it."
   },
 
   "injector": {

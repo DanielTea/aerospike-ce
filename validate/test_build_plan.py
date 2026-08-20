@@ -211,3 +211,68 @@ def test_plan_features_match_the_python_features(plan, design):
 
     assert len(plan["parts"]["cowl"]["bosses"]) == len(gf["cowl"]["bosses"])
     assert len(plan["parts"]["head"]["plenums"]) == len(gf["head"]["plenums"])
+
+
+def test_the_narrowest_feature_is_something_a_machine_can_print():
+    """
+    The voxel size follows the narrowest feature, so an unprintably fine
+    channel is expensive twice: it cannot be built, and it forces the whole
+    engine to be meshed fine enough to keep it.
+
+    Left free the cooling search picks 0.4 mm, because a narrower channel runs
+    faster coolant past more surface. 0.4 mm is below what a powder-bed machine
+    holds and below what an inspection resolves. This pins the floor so the
+    search cannot quietly walk back under it.
+    """
+    spec = json.load(open(os.path.join(os.path.dirname(__file__),
+                                       "..", "spec", "regen.json")))
+    narrow = narrowest_feature(build_plan(spec))
+    assert narrow >= 0.7 - 1e-9, (
+        f"narrowest feature {narrow:.3f} mm is below the process floor")
+
+
+def test_every_hole_in_the_plan_says_what_it_is():
+    """
+    The head carries injector orifices and mounting bolt holes in one list.
+    Anything downstream that wants one kind needs to be able to say which.
+    """
+    spec = json.load(open(os.path.join(os.path.dirname(__file__),
+                                       "..", "spec", "regen.json")))
+    plan = build_plan(spec)
+    for part in plan["parts"].values():
+        for h in part["holes"]:
+            assert h["name"], "a hole reached the plan with no name"
+
+
+def test_the_print_file_and_the_plan_describe_the_same_engine():
+    """
+    Two consumers read the same design: `print_ready.py` meshes it in Python,
+    and `build_plan.py` writes it out for the C# voxel kernel. They are separate
+    code paths, so they can disagree -- and a disagreement here means the STL
+    you inspected and the part PicoGK built are different objects, which is the
+    exact failure mode the plan file was introduced to remove.
+
+    Counting features is enough to catch it. The bugs that actually happened
+    were an extra ring of orifices in one path and a missing set of ribs in the
+    other; neither changes a dimension, both change a count.
+    """
+    from print_ready import features_for
+
+    spec = json.load(open(os.path.join(os.path.dirname(__file__),
+                                       "..", "spec", "regen.json")))
+    design = design_engine(spec)
+    plan = build_plan(spec, design)
+
+    for part, planned in plan["parts"].items():
+        meshed = features_for(design, part)
+        for key in ("channels", "ports", "holes", "bosses",
+                    "lugs", "plenums", "ribs", "legs"):
+            got = meshed.get(key) or []
+            assert len(got) == len(planned[key]), (
+                f"{part}: print_ready has {len(got)} {key}, "
+                f"the plan has {len(planned[key])}")
+
+    # and the holes agree on which is which, not merely on how many
+    for part, planned in plan["parts"].items():
+        meshed = features_for(design, part)["holes"] or []
+        assert sorted(h.name for h in meshed) == sorted(h["name"] for h in planned["holes"])

@@ -66,7 +66,6 @@ def build_plan(spec: dict, design=None) -> dict:
         centrebody_channels,
         cowl_channels,
         feed_ports,
-        injector_holes,
     )
 
     d = design if design is not None else design_engine(spec)
@@ -123,14 +122,10 @@ def build_plan(spec: dict, design=None) -> dict:
             "r_hi_mm": _f(port.r_hi), "phase_rad": _f(port.phase),
         })
 
-    # ---- injector orifices ----
-    if d.injector is not None:
-        for h in injector_holes(a, d.injector):
-            plan["parts"]["head"]["holes"].append({
-                "radius_mm": _f(h.radius_mm), "diameter_mm": _f(h.diameter_mm),
-                "count": int(h.count), "x_start_mm": _f(h.x_start),
-                "x_end_mm": _f(h.x_end), "phase_rad": _f(h.phase),
-            })
+    # The injector orifices are not made here. geometry_features owns them,
+    # because where an orifice starts depends on where the plenum feeding it
+    # ended up, and generating them from an assumed offset as well would put a
+    # second, differently-placed set of orifices in the same disc.
 
     # ---- manifolds, their boss rings, and the mounts ----
     for part, feats in gf.items():
@@ -153,7 +148,8 @@ def build_plan(spec: dict, design=None) -> dict:
             plan["parts"][part]["holes"].append({
                 "radius_mm": _f(h.radius_mm), "diameter_mm": _f(h.diameter_mm),
                 "count": int(h.count), "x_start_mm": _f(h.x_start),
-                "x_end_mm": _f(h.x_end), "phase_rad": _f(h.phase)})
+                "x_end_mm": _f(h.x_end), "phase_rad": _f(h.phase),
+                "name": h.name})
 
     # ---- external shell: stiffening ribs and splayed legs ----
     from shell_ref import shell_features

@@ -292,12 +292,37 @@ namespace AerospikeCE
                             Math.Max(h.XStart - x, x - h.XEnd));
         }
 
+        // Exact distance to the rhombus, then offset by the fillet. Mirrors
+        // _plenum_sdf in mesh_solid.py, deliberately: PicoGK renders the same
+        // implicit the Python mesher samples, so the two carry one formulation
+        // rather than two descriptions of the same cavity.
+        //
+        // The fillet is load-bearing. A diamond apex is a sharp internal edge
+        // that no powder-bed machine makes, and sampled exactly on it marching
+        // cubes emits a pinch: two non-manifold edges in fifteen million, no
+        // boundary anywhere, and a part that fails watertightness with nothing
+        // visibly wrong.
         private static double PlenumDistance(double x, double r, PlenumCut p)
         {
             double rc = p.RInner + p.HalfR;
-            double a = Math.Max(p.HalfX, 1e-6), b = Math.Max(p.HalfR, 1e-6);
-            double v = Math.Abs(x - p.XAt) / a + Math.Abs(r - rc) / b - 1.0;
-            return v / Math.Sqrt(1.0 / (a * a) + 1.0 / (b * b));
+            // Shrunk by the fillet measured perpendicular to the faces, not
+            // subtracted from the half-diagonals. On a ten-to-one section those
+            // differ by enough to make the rounded shape larger than the
+            // diamond it is supposed to fit inside.
+            double rad = Math.Min(0.4, Math.Min(0.25 * p.HalfR, 0.25 * p.HalfX));
+            double face = p.HalfX * p.HalfR / Math.Sqrt(p.HalfX * p.HalfX + p.HalfR * p.HalfR);
+            double k = Math.Max(1.0 - rad / face, 1e-6);
+            double a = Math.Max(p.HalfX * k, 1e-6);
+            double b = Math.Max(p.HalfR * k, 1e-6);
+
+            double px = Math.Abs(x - p.XAt);
+            double py = Math.Abs(r - rc);
+            double h = ((a - 2.0 * px) * a - (b - 2.0 * py) * b) / (a * a + b * b);
+            h = Math.Clamp(h, -1.0, 1.0);
+            double qx = px - 0.5 * a * (1.0 - h);
+            double qy = py - 0.5 * b * (1.0 + h);
+            double d = Math.Sqrt(qx * qx + qy * qy);
+            return d * Math.Sign(px * b + py * a - a * b) - rad;
         }
 
         private static double RingBossDistance(double x, double r, RingBoss b)

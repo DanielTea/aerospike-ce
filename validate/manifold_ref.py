@@ -84,6 +84,37 @@ class Plenum:
     def self_supporting(self, limit_deg: float = 45.0) -> bool:
         return self.roof_angle_deg >= limit_deg - 1e-9
 
+    def half_x_at(self, radius_mm: float) -> float:
+        """
+        How deep the section is at one radius, axially. Zero outside.
+
+        The section is a diamond, so its axial extent is greatest at the centre
+        radius and tapers to nothing at either edge. Reading the extreme tip as
+        though it applied across the whole width is how an orifice ends up
+        stopping five millimetres short of the plenum it is supposed to enter,
+        while every dimension involved still looks right.
+        """
+        t = abs(radius_mm - self.r_centre_mm) / max(self.half_r_mm, 1e-9)
+        return self.half_x_mm * max(1.0 - t, 0.0)
+
+    def reaches(self, radius_mm: float, depth_mm: float = 1.0) -> bool:
+        """Whether the section is genuinely open at a radius, not just grazing."""
+        return self.half_x_at(radius_mm) >= depth_mm
+
+    def x_admitting(self, radius_mm: float, bore_radius_mm: float) -> float | None:
+        """
+        Aft-most x at which a bore of this radius is *wholly* inside the section.
+
+        Not the same as the aft face. The section narrows to a rounded point at
+        its tip, so a hole that merely crosses the tip meets a cavity a few
+        tenths of a millimetre across and seals at any real voxel. Starting the
+        hole here instead means it opens into full section.
+        """
+        t = (abs(radius_mm - self.r_centre_mm) + bore_radius_mm) / max(self.half_r_mm, 1e-9)
+        if t >= 1.0:
+            return None
+        return self.x_mm + self.half_x_mm * (1.0 - t)
+
 
 @dataclass(frozen=True)
 class MountLug:
@@ -286,6 +317,85 @@ def design_manifolds(design, velocity: float = 4.0, aspect: float = 1.2,
             f"{out.lugs.shear_stress_pa / 1e6:.0f} MPa, edge "
             f"{out.lugs.edge_distance_mm:.1f} mm. Lengthen the lug or add more.")
 
+    # A plenum has to fit inside the metal that carries it, and it has to sit
+    # around the ring of orifices it exists to feed. Those are two constraints,
+    # and satisfying only the first is what went wrong here: sized on flow alone
+    # the fuel manifold and the oxidiser dome span r 67 to 135 mm between them,
+    # across a head disc that only runs 70 to 123, so they cut it clean in half.
+    # Packing them outward from the bore to fix that left the oxidiser dome at
+    # r 98 to 117 while its own orifices sat at r 88 -- the dome fed nothing,
+    # and the orifices pointed instead at the radius the *fuel* manifold
+    # occupies. Nothing downstream would have caught that: the part is
+    # watertight either way, and it took the sealed-void check noticing 325 cm3
+    # of powder with no way out.
+    #
+    # So each band is built around its own ring, and the wall between two bands
+    # falls halfway between the two rings.
+    r_bore = float(a.cavity_r[0])
+    wall = a.structure.wall_thickness_mm
+    r_lo, r_hi = r_bore + wall, a.flange_radius - wall
+    head_plenums = [p for p in out.plenums if p.name != "cowl_inlet_ring"]
+
+    rings: dict[str, float] = {}
+    if design.injector is not None:
+        rings["head_fuel_manifold"] = design.injector.fuel_ring_radius * 1e3
+        rings["ox_dome"] = design.injector.ox_ring_radius * 1e3
+
+    if head_plenums and all(p.name in rings for p in head_plenums):
+        ordered = sorted(head_plenums, key=lambda p: rings[p.name])
+        radii = [rings[p.name] for p in ordered]
+
+        edges = [r_lo]
+        for lo, hi in zip(radii, radii[1:]):
+            if hi - lo <= 2.0 * wall:
+                out.notes.append(
+                    f"orifice rings at r {lo:.1f} and {hi:.1f} mm are "
+                    f"{hi - lo:.1f} mm apart, which leaves no room for a "
+                    f"{wall:.1f} mm wall between the manifolds feeding them. "
+                    f"Spread the injector rings or thin the wall.")
+            edges.append(0.5 * (lo + hi))
+        edges.append(r_hi)
+
+        # Depth available inside the disc, wall either side.
+        max_half_x = max(0.5 * (a.structure.head_thickness_mm - 2.0 * wall), 1.0)
+
+        for i, p in enumerate(ordered):
+            inner = edges[i] + (0.5 * wall if i else 0.0)
+            outer = edges[i + 1] - (0.5 * wall if i < len(ordered) - 1 else 0.0)
+            # Centred on the ring, so the section is deepest exactly where the
+            # orifices meet it rather than tapering to nothing there.
+            half_r = max(min(radii[i] - inner, outer - radii[i]), 1.0)
+            half_x = min(max(p.area_mm2 / (2.0 * half_r), half_r), max_half_x)
+
+            # The area is now whatever fits, so the velocity is whatever that
+            # area implies. Reporting the velocity that was asked for would be
+            # reporting a number the geometry does not have -- and the area is
+            # the filleted section's, not the sharp diamond's, for the same
+            # reason.
+            from mesh_solid import plenum_section_area_mm2
+            area_m2 = plenum_section_area_mm2(half_x, half_r) * 1e-6
+            velocity = 0.5 * p.mass_flow / (p.density * area_m2)
+
+            fixed = Plenum(
+                name=p.name, x_mm=p.x_mm, r_inner_mm=radii[i] - half_r,
+                half_x_mm=half_x, half_r_mm=half_r,
+                mass_flow=p.mass_flow, velocity=velocity,
+                density=p.density, feeds=p.feeds)
+            out.plenums[out.plenums.index(p)] = fixed
+
+            if velocity > p.velocity * 1.05:
+                out.notes.append(
+                    f"{p.name} runs at {velocity:.1f} m/s, not the "
+                    f"{p.velocity:.1f} asked for: the ring is {2 * half_r:.1f} mm "
+                    f"wide because that is the space between its orifice ring and "
+                    f"its neighbour's, and {2 * half_x:.0f} mm deep because that "
+                    f"is the disc. A manifold this fast distributes less evenly.")
+            if not fixed.reaches(radii[i], depth_mm=1.0):
+                out.notes.append(
+                    f"{p.name} is only {2 * fixed.half_x_at(radii[i]):.2f} mm deep "
+                    f"at r {radii[i]:.1f} mm where its orifices meet it. They will "
+                    f"not connect.")
+
     # The head has to be thick enough to contain the plenums it carries, plus a
     # wall either side. Sizing the disc by eye and then discovering the dome
     # does not fit inside it is the manifold equivalent of the flange being too
@@ -342,6 +452,40 @@ import numpy as np  # noqa: E402  (used by design_manifolds)
 # geometry
 # --------------------------------------------------------------------------
 
+def plenum_feeding(md: ManifoldDesign, radius_mm: float, depth_mm: float = 1.0):
+    """
+    The head plenum a ring of orifices at this radius actually opens into.
+
+    By geometry, not by name. An orifice does not care which manifold was meant
+    to feed it -- it connects to whatever void lies at its radius, and getting
+    that wrong crosses the propellants rather than merely failing to plumb them.
+    """
+    found = [p for p in md.plenums
+             if p.name != "cowl_inlet_ring" and p.reaches(radius_mm, depth_mm)]
+    return found[0] if len(found) == 1 else None
+
+
+def orifice_start_x(md: ManifoldDesign, radius_mm: float, bore_mm: float,
+                    fallback: float) -> float:
+    """
+    Where an orifice must begin so that it opens into the plenum feeding it.
+
+    Deep enough that the whole bore is inside the section, not merely touching
+    its tip. Touching is not connecting: the diamond tapers to a rounded point,
+    so a hole that just crosses the extreme face meets a few tenths of a
+    millimetre of cavity and rounds shut at any real voxel size, leaving the
+    plenum sealed and full of powder.
+
+    Measured at the orifice's own radius, because the section reaches furthest
+    aft at its centre radius and less everywhere else.
+    """
+    p = plenum_feeding(md, radius_mm, depth_mm=bore_mm)
+    if p is None:
+        return fallback
+    x = p.x_admitting(radius_mm, 0.5 * bore_mm)
+    return fallback if x is None else x
+
+
 def geometry_features(design, md: ManifoldDesign, wall_mm: float | None = None):
     """
     Turn the sized manifolds and mounts into distance-field features, per part.
@@ -375,6 +519,20 @@ def geometry_features(design, md: ManifoldDesign, wall_mm: float | None = None):
                 x_at=p.x_mm, r_inner=p.r_inner_mm,
                 half_x=p.half_x_mm, half_r=p.half_r_mm))
 
+    # The orifices belong with the plenums they feed, so they are built here
+    # where both are known rather than from an assumed offset elsewhere.
+    if design.injector is not None:
+        from mesh_solid import injector_holes
+        fallback = a.head_x - (wall + 3.0)
+        out["head"]["holes"].extend(injector_holes(
+            a, design.injector,
+            x_start_fuel=orifice_start_x(
+                md, design.injector.fuel_ring_radius * 1e3,
+                design.injector.d_fuel_mm, fallback),
+            x_start_ox=orifice_start_x(
+                md, design.injector.ox_ring_radius * 1e3,
+                design.injector.d_ox_mm, fallback)))
+
     if md.lugs is not None:
         L = md.lugs
         x_face = a.head_x - a.structure.head_thickness_mm
@@ -386,5 +544,6 @@ def geometry_features(design, md: ManifoldDesign, wall_mm: float | None = None):
         out["head"]["holes"].append(HoleCut(
             radius_mm=L.hole_radius_mm, diameter_mm=L.hole_diameter_mm,
             count=L.count, x_start=x_mid - L.thickness_mm,
-            x_end=x_mid + L.thickness_mm, phase=math.radians(45.0)))
+            x_end=x_mid + L.thickness_mm, phase=math.radians(45.0),
+            name="mount_hole"))
     return out

@@ -199,13 +199,20 @@ class LugAdd:
 
 @dataclass(frozen=True)
 class HoleCut:
-    """A ring of axial holes, for injector orifices."""
+    """
+    A ring of axial holes.
+
+    Named, because the head carries two kinds -- injector orifices and mounting
+    bolt holes -- in one list, and a check that wants one of them has no other
+    way to tell which is which than picking an index and hoping.
+    """
     radius_mm: float            # ring radius on the face
     diameter_mm: float
     count: int
     x_start: float
     x_end: float
     phase: float = 0.0
+    name: str = ""
 
 
 def _channel_sdf(X, R, TH, cut: ChannelCut) -> np.ndarray:
@@ -245,13 +252,62 @@ def _port_sdf(X, R, TH, cut: PortCut) -> np.ndarray:
     return np.maximum(np.maximum(d_theta, d_axial), d_radial).astype(np.float32)
 
 
+def plenum_fillet_mm(half_x: float, half_r: float) -> float:
+    """Radius the diamond's corners are rounded to."""
+    return min(0.4, 0.25 * half_r, 0.25 * half_x)
+
+
+def plenum_section(half_x: float, half_r: float):
+    """
+    The rhombus that, offset outward by the fillet, gives the plenum section.
+
+    Shrunk by the fillet measured perpendicular to the faces, not by subtracting
+    it from the half-diagonals. On a ten-to-one section those are not remotely
+    the same thing: taking a fifth of a millimetre off a 20 mm half-diagonal
+    barely moves the face it belongs to, and the rounded shape ends up eighteen
+    percent *larger* than the diamond it was supposed to fit inside.
+    """
+    rad = plenum_fillet_mm(half_x, half_r)
+    face = half_x * half_r / math.hypot(half_x, half_r)   # centre to face
+    k = max(1.0 - rad / face, 1e-6)
+    return half_x * k, half_r * k, rad
+
+
+def plenum_section_area_mm2(half_x: float, half_r: float) -> float:
+    """Flow area of the filleted section: rhombus, plus its offset band."""
+    a, b, rad = plenum_section(half_x, half_r)
+    return 2.0 * a * b + 4.0 * math.hypot(a, b) * rad + math.pi * rad * rad
+
+
 def _plenum_sdf(X, R, cut: PlenumCut) -> np.ndarray:
-    """Distance to the diamond ring. Negative inside."""
+    """
+    Distance to the diamond ring, corners filleted. Negative inside.
+
+    The fillet is not cosmetic. A diamond's apex is a mathematically sharp
+    internal edge -- the section closes to zero width there -- and no powder-bed
+    machine makes one: it fills with a radius whether you draw it or not. It is
+    also degenerate to mesh. Sampled exactly on the apex, marching cubes emits a
+    pinch where the surface meets itself, and the part comes back with two
+    non-manifold edges out of fifteen million and no boundary at all, which
+    reads as a watertightness failure with nothing visibly wrong anywhere.
+
+    Exact distance to the rhombus, after Quilez, then offset by the fillet. The
+    half-diagonals are shrunk by the same radius first, so the filleted ring
+    stays inside the envelope its dimensions claim rather than growing past it.
+    """
     rc = cut.r_inner + cut.half_r
-    a, b = max(cut.half_x, 1e-6), max(cut.half_r, 1e-6)
-    # plane distance to |dx|/a + |dr|/b = 1, exact on the faces
-    v = np.abs(X - cut.x_at) / a + np.abs(R - rc) / b - 1.0
-    return (v / math.sqrt(1.0 / (a * a) + 1.0 / (b * b))).astype(np.float32)
+    a, b, rad = plenum_section(cut.half_x, cut.half_r)
+    a, b = max(a, 1e-6), max(b, 1e-6)
+
+    px = np.abs(X - cut.x_at)
+    py = np.abs(R - rc)
+    h = np.clip(((a - 2.0 * px) * a - (b - 2.0 * py) * b) / (a * a + b * b),
+                -1.0, 1.0)
+    qx = px - 0.5 * a * (1.0 - h)
+    qy = py - 0.5 * b * (1.0 + h)
+    d = np.sqrt(qx * qx + qy * qy)
+    sign = np.sign(px * b + py * a - a * b)
+    return (d * sign - rad).astype(np.float32)
 
 
 def _ring_boss_sdf(X, R, boss: RingBoss) -> np.ndarray:
@@ -582,7 +638,9 @@ def centrebody_channels(a: EngineAssembly, channel_spec, back_wall_mm: float = 0
     )
 
 
-def injector_holes(a: EngineAssembly, injector) -> list[HoleCut]:
+def injector_holes(a: EngineAssembly, injector,
+                   x_start_fuel: float | None = None,
+                   x_start_ox: float | None = None) -> list[HoleCut]:
     """Fuel and oxidiser orifice rings through the head disc."""
     # An orifice runs from its plenum to the chamber face, not through the whole
     # block. Once the head was thickened to hold the manifolds, a hole through
@@ -590,14 +648,21 @@ def injector_holes(a: EngineAssembly, injector) -> list[HoleCut]:
     # drill or print straight, and which marching cubes cannot hold together
     # either. The plenums occupy the depth; the orifice is the short run between
     # the plenum's aft face and the chamber.
-    x0 = a.head_x - (a.structure.wall_thickness_mm + 3.0)
+    # One start per ring, because the two rings meet their plenums at different
+    # radii and the plenum section is a diamond: how far aft it reaches depends
+    # on where you meet it. A single shared offset was wrong for both.
+    default = a.head_x - (a.structure.wall_thickness_mm + 3.0)
+    xf = default if x_start_fuel is None else x_start_fuel
+    xo = default if x_start_ox is None else x_start_ox
     x1 = a.head_x + 1.0
     half_pitch = math.pi / injector.n_elements
     return [
         HoleCut(injector.fuel_ring_radius * 1e3, injector.d_fuel_mm,
-                injector.n_elements, x0, x1, phase=0.0),
+                injector.n_elements, xf, x1, phase=0.0,
+                name="fuel_orifice"),
         HoleCut(injector.ox_ring_radius * 1e3, injector.d_ox_mm,
-                injector.n_elements, x0, x1, phase=half_pitch),
+                injector.n_elements, xo, x1, phase=half_pitch,
+                name="ox_orifice"),
     ]
 
 

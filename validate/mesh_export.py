@@ -394,3 +394,109 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# --------------------------------------------------------------------------
+# 3MF
+# --------------------------------------------------------------------------
+
+def write_3mf(path: str, parts: dict, unit: str = "millimeter") -> None:
+    """
+    Write parts as a single 3MF, the format additive manufacturing actually uses.
+
+    STL is a triangle soup with no units in it. Every slicer guesses millimetres
+    and is usually right, which is not the same as being told -- and a part that
+    silently arrives at a twenty-fifth of its size is a real way to waste a
+    build. 3MF states its unit, carries each part as a named object, and zips,
+    which matters when the geometry has several hundred cooling channels in it.
+
+    `parts` maps a name to (vertices, faces).
+    """
+    import zipfile
+
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>'
+        '</Types>')
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Target="/3D/3dmodel.model" Id="rel0" '
+        'Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>'
+        '</Relationships>')
+
+    # Streamed into the zip rather than assembled first. An engine with several
+    # hundred cooling channels in it runs to millions of triangles, and at
+    # roughly 55 bytes of markup each that is a gigabyte of XML: joining it into
+    # one string costs several times that in peak memory, to produce a value
+    # that is written once and thrown away.
+    def emit(w) -> None:
+        w.write(b'<?xml version="1.0" encoding="UTF-8"?>\n')
+        w.write(f'<model unit="{unit}" xml:lang="en-US" '
+                'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">'
+                '<resources>'.encode())
+        for oid, (name, (verts, faces)) in enumerate(parts.items(), start=1):
+            w.write(f'<object id="{oid}" type="model" name="{name}">'
+                    '<mesh><vertices>'.encode())
+            # 4 decimals is a tenth of a micron: far under any printer, and it
+            # keeps the file from being mostly trailing digits.
+            for i in range(0, len(verts), 65536):
+                w.write("".join(
+                    f'<vertex x="{v[0]:.4f}" y="{v[1]:.4f}" z="{v[2]:.4f}"/>'
+                    for v in verts[i:i + 65536]).encode())
+            w.write(b'</vertices><triangles>')
+            for i in range(0, len(faces), 65536):
+                w.write("".join(
+                    f'<triangle v1="{f[0]}" v2="{f[1]}" v3="{f[2]}"/>'
+                    for f in faces[i:i + 65536]).encode())
+            w.write(b'</triangles></mesh></object>')
+        w.write(b'</resources><build>')
+        for oid in range(1, len(parts) + 1):
+            w.write(f'<item objectid="{oid}"/>'.encode())
+        w.write(b'</build></model>')
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        z.writestr("[Content_Types].xml", content_types)
+        z.writestr("_rels/.rels", rels)
+        with z.open("3D/3dmodel.model", "w") as w:
+            emit(w)
+
+
+def read_3mf(path: str) -> dict:
+    """
+    Read a 3MF back, so the writer is checked rather than trusted.
+
+    Parsed incrementally. A whole engine at print resolution is tens of
+    millions of elements and about a gigabyte of XML once decompressed; running
+    a regex over that as one string needs several gigabytes to answer a
+    question that only ever needs one element at a time.
+    """
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    out: dict = {"unit": None, "objects": {}}
+    with zipfile.ZipFile(path) as z, z.open("3D/3dmodel.model") as fh:
+        name, vx, tri = None, [], []
+        for event, el in ET.iterparse(fh, events=("start", "end")):
+            tag = el.tag.rsplit("}", 1)[-1]
+            if event == "start":
+                if tag == "model":
+                    out["unit"] = el.get("unit")
+                elif tag == "object":
+                    name, vx, tri = el.get("name"), [], []
+                continue
+            if tag == "vertex":
+                vx.append((float(el.get("x")), float(el.get("y")), float(el.get("z"))))
+            elif tag == "triangle":
+                tri.append((int(el.get("v1")), int(el.get("v2")), int(el.get("v3"))))
+            elif tag == "object":
+                out["objects"][name] = (
+                    np.asarray(vx, dtype=float).reshape(-1, 3),
+                    np.asarray(tri, dtype=np.int64).reshape(-1, 3))
+                name, vx, tri = None, [], []
+            # Elements are dropped as they close; kept, the tree grows back into
+            # the whole file and the streaming buys nothing.
+            el.clear()
+    return out
