@@ -573,6 +573,11 @@ def main() -> int:
     if unknown:
         print(f"unknown stage(s): {', '.join(unknown)}")
         return 2
+    if not wanted:
+        # Running nothing and reporting PASS is the one output this must never
+        # produce: a mistyped --stage in a CI file would go green for ever.
+        print(f"--stage selected no stages; pick from {', '.join(STAGES)}")
+        return 2
 
     with open(args.spec, encoding="utf-8") as fh:
         spec = json.load(fh)
