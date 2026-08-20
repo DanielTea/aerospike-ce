@@ -12,15 +12,23 @@ mounting hole in it.
 > nothing in the gate at the time could see it. A slicer can, and reports it as
 > missing or extraneous surfaces. Rebuild rather than download it.
 
-It is a release asset rather than a file in the tree because it is 409 MB, and
-a generated artifact of that size does not belong in git history. The thing
-worth versioning is the generator, which is here.
+It is not a file in the tree. It is 409 MB, GitHub refuses a single file over
+100, and a generated artifact of that size does not belong in history anyway:
+the thing worth versioning is the generator, which is here.
 
-**Or let CI build it for you.** The `print file` workflow builds it, runs the
-release gate on the written file, and attaches it to its own run, so it can be
-downloaded from the Actions tab without anyone needing release permissions or
-409 MB of git history. It takes about an hour and it will not upload a file
-that failed its own gate.
+**Download:** the latest green run of the
+[`print file` workflow](https://github.com/DanielTea/aerospike-ce/actions/workflows/print-file.yml)
+carries it as an artifact named `print-file`. The job builds it, runs the
+release gate on the written file, and only then uploads, so anything on that
+page passed its own checks; a run whose gate failed has a `release-report`
+saying why and no print file at all. Artifacts keep for 30 days, and rebuilding
+is one button.
+
+A release asset would do the same job, and is the better home once there is a
+version worth naming; the workflow exists because it needs no permission to
+publish anything. It takes about half an hour on a GitHub runner -- roughly
+twice as fast as the four-core machine it was developed on, for identical
+triangle counts, genus and volumes.
 
 ```bash
 gh workflow run "print file"                    # once this is on the default branch
