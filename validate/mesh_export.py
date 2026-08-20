@@ -646,6 +646,18 @@ if __name__ == "__main__":
 # 3MF
 # --------------------------------------------------------------------------
 
+# Decimal places a vertex is written to, and the reason it is six rather than
+# four. Four is a tenth of a micron, which is far under any printer -- but it is
+# not under the mesher. `mesh_solid.level_guard_mm` deliberately separates a
+# marching-cubes vertex from its sample by about 1.5e-4 mm, and writing at 1e-4
+# rounds that separation away again: the first file built with the guard in
+# place came back off disk with 416 triangles that had area in memory and none
+# on disk. The written quantum has to sit well under the smallest separation
+# the mesher can produce, so a nanometre it is, and the part is snapped to this
+# grid *before* it is checked rather than after.
+WRITE_DECIMALS = 6
+
+
 def write_3mf(path: str, parts: dict, unit: str = "millimeter") -> None:
     """
     Write parts as a single 3MF, the format additive manufacturing actually uses.
@@ -686,11 +698,11 @@ def write_3mf(path: str, parts: dict, unit: str = "millimeter") -> None:
         for oid, (name, (verts, faces)) in enumerate(parts.items(), start=1):
             w.write(f'<object id="{oid}" type="model" name="{name}">'
                     '<mesh><vertices>'.encode())
-            # 4 decimals is a tenth of a micron: far under any printer, and it
-            # keeps the file from being mostly trailing digits.
             for i in range(0, len(verts), 65536):
                 w.write("".join(
-                    f'<vertex x="{v[0]:.4f}" y="{v[1]:.4f}" z="{v[2]:.4f}"/>'
+                    f'<vertex x="{v[0]:.{WRITE_DECIMALS}f}" '
+                    f'y="{v[1]:.{WRITE_DECIMALS}f}" '
+                    f'z="{v[2]:.{WRITE_DECIMALS}f}"/>'
                     for v in verts[i:i + 65536]).encode())
             w.write(b'</vertices><triangles>')
             for i in range(0, len(faces), 65536):

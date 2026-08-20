@@ -54,7 +54,8 @@ from scipy.sparse.csgraph import connected_components
 from build_plan import build_plan, narrowest_feature
 from engine_design import design_engine
 from manifold_ref import design_manifolds, geometry_features
-from mesh_export import manifold_report, mesh_volume, slicing_report, write_3mf
+from mesh_export import (WRITE_DECIMALS, manifold_report, mesh_volume,
+                        slicing_report, write_3mf)
 from mesh_solid import (
     _weld,
     build_mesh_streaming,
@@ -134,6 +135,29 @@ def sealed_voids(verts: np.ndarray, faces: np.ndarray) -> list:
     injector orifice that has stopped reaching the plenum it feeds.
     """
     return [v for _, v in surfaces(verts, faces) if v < 0.0]
+
+
+def snap_to_the_written_grid(verts, faces):
+    """
+    Move the mesh onto the grid the file will be written on, before checking it.
+
+    A 3MF carries coordinates as decimal text, so writing quantises. Checking
+    the mesh in memory and then quantising it means the thing that was checked
+    and the thing a slicer opens are two different meshes -- and they were: the
+    first file built with the level guard in place reported no zero-area
+    triangles anywhere in memory and came back off disk with 416 of them, 400
+    on the centrebody alone. Nothing was wrong with the mesh and nothing was
+    wrong with the writer. They simply never met.
+
+    So the rounding happens here, and what follows is checked on the result.
+    Vertices that land on the same point are welded, which drops the faces that
+    then have two identical corners without opening the surface -- the same
+    repair a decimation collapse needs, for the same reason. Anything still
+    flat afterwards had three distinct corners in a line, which welding cannot
+    fix and the gate refuses.
+    """
+    v = np.round(np.asarray(verts, dtype=float), WRITE_DECIMALS)
+    return _weld(v, faces, tol=10.0 ** -WRITE_DECIMALS)
 
 
 def check(verts, faces, label: str, deep: bool = False) -> dict:
@@ -276,6 +300,9 @@ def main() -> None:
                                     **features_for(design, part))
         raw = len(f)
         v, f, rep = reduce_safely(v, f, args.keep)
+        # Onto the write grid first, so the mesh that is checked below is the
+        # mesh that reaches the file, down to the last decimal.
+        v, f = snap_to_the_written_grid(v, f)
         # The ladder runs on the cheap checks; the part that actually gets
         # written is asked the expensive question once, here.
         rep = check(v, f, rep["label"], deep=True)

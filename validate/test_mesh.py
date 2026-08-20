@@ -365,3 +365,50 @@ def test_every_revolved_part_passes_the_slicing_gate(meshes):
         assert rep["inconsistent_edges"] == 0, name
         assert rep["nonmanifold_vertices"] == 0, name
         assert rep["outward"], name
+
+
+def test_what_is_checked_is_what_reaches_the_file():
+    """
+    A sliver with area in memory and none on disk.
+
+    3MF carries coordinates as decimal text, so writing quantises. A triangle
+    whose corners are closer together than the written quantum has area right
+    up until it is written and none afterwards -- and checking the mesh in
+    memory and then writing it means the thing that was checked and the thing a
+    slicer opens are two different meshes. They were: the first print file
+    built with the level guard in place reported no zero-area triangles
+    anywhere in memory and came back off disk with 416.
+
+    Here vertex 8 sits a nanometre along the diagonal from vertex 0, which
+    splits the two faces meeting there into a pair of ordinary triangles and a
+    pair of slivers. Every area is positive. None of them survives six decimal
+    places.
+    """
+    import tempfile
+
+    from mesh_export import WRITE_DECIMALS, read_3mf, write_3mf
+    from print_ready import snap_to_the_written_grid
+
+    v, f = _cube()
+    v = np.concatenate([v, [v[0] + 1e-9 * (v[2] - v[0])]])
+    keep = [row for row in f.tolist() if row not in ([0, 3, 2], [0, 2, 1])]
+    f = np.array(keep + [[0, 3, 8], [8, 3, 2], [0, 8, 1], [8, 2, 1]])
+
+    assert manifold_report(v, f)["watertight"]
+    assert manifold_report(v, f)["degenerate_faces"] == 0, "every area is positive here"
+    assert manifold_report(np.round(v, WRITE_DECIMALS), f)["degenerate_faces"] == 2, (
+        "and two of them are gone the moment the file is written")
+
+    sv, sf = snap_to_the_written_grid(v, f)
+    rep = manifold_report(sv, sf)
+    assert rep["watertight"], "the weld must not open the surface"
+    assert rep["boundary_edges"] == 0
+    assert rep["degenerate_faces"] == 0, "the slivers are gone, not merely rounded"
+
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "snapped.3mf")
+        write_3mf(path, {"cube": (sv, sf)})
+        got_v, got_f = read_3mf(path)["objects"]["cube"]
+    assert np.array_equal(got_v, sv), "the file must carry what was checked"
+    assert np.array_equal(got_f, sf)
+    assert manifold_report(got_v, got_f)["degenerate_faces"] == 0
