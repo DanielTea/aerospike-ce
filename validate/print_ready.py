@@ -54,6 +54,7 @@ from engine_design import design_engine
 from manifold_ref import design_manifolds, geometry_features
 from mesh_export import manifold_report, mesh_volume, write_3mf
 from mesh_solid import (
+    _weld,
     build_mesh_streaming,
     centrebody_channels,
     cowl_channels,
@@ -137,6 +138,23 @@ def reduce_safely(verts, faces, target_ratio: float, tol_volume: float = 0.02):
     watertight, still looks like an engine, and no longer has the feature the
     part exists for.
     """
+    def repair(v, f):
+        """
+        Weld coincident vertices and drop what is left with no area.
+
+        A quadric collapse can slide three vertices into a line. The face it
+        leaves has no normal, which is the one property a slicer reads and none
+        of the topology checks do -- and refusing the step outright costs the
+        whole decimation: on the centrebody every rung produces one, so the
+        part shipped all 16 million of its triangles. Welding merges the
+        vertices the collapse made coincident, and the faces that then have
+        two identical corners come out without opening the surface.
+        """
+        v2, f2 = _weld(v, f)
+        a, b, c = v2[f2[:, 0]], v2[f2[:, 1]], v2[f2[:, 2]]
+        area = 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)
+        return v2, f2[area > 0.0]
+
     base = check(verts, faces, "base")
     best = (verts, faces, base)
     # Mildest first, stopping at the target. Walking the other way -- skipping
@@ -156,7 +174,7 @@ def reduce_safely(verts, faces, target_ratio: float, tol_volume: float = 0.02):
                   0.2, 0.15, 0.12, 0.08, 0.05):
         if ratio < target_ratio:
             continue
-        v2, f2 = decimate(verts, faces, ratio)
+        v2, f2 = repair(*decimate(verts, faces, ratio))
         rep = check(v2, f2, f"keep {ratio:.2f}")
         if not rep["watertight"] or rep["surfaces"] != base["surfaces"]:
             break
@@ -165,6 +183,8 @@ def reduce_safely(verts, faces, target_ratio: float, tol_volume: float = 0.02):
         # The field carries no zero-area triangles once it is meshed off the
         # bias; the decimator puts them back, and every other check here says
         # the result is fine. export_cooled applies the same criterion.
+        # After the repair this should be zero; if it is not, the collapse did
+        # something a weld cannot undo and the step is not safe to take.
         if rep["degenerate_faces"] > base["degenerate_faces"]:
             break
         if rep["genus"] != base["genus"]:
