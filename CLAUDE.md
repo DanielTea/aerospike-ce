@@ -241,6 +241,25 @@ The general lesson: **a fix that works at one grid alignment is not a fix.**
 Sweep the lattice offset, the same way geometry gets swept over the parameter
 range.
 
+## Check the mesh on the grid the file is written on
+
+A 3MF carries coordinates as decimal text, so writing quantises. Check in
+memory and write afterwards and the two are different meshes: the first print
+file built with the level guard reported no zero-area triangles anywhere in
+memory and came back off disk with 416 of them.
+
+The guard and the writer were arguing about the same decimal place --
+`level_guard_mm` separates a vertex from its sample by about 1.5e-4 mm and the
+writer used four decimals, a tenth of a micron. Both were individually correct.
+
+Two rules follow. A writer's precision is part of the geometry, not a
+formatting choice, and it has to sit *well under* the smallest separation the
+mesher can produce rather than level with it. And quantise before checking, not
+after: `snap_to_the_written_grid` rounds and then welds, so the vertices that
+land on the same point merge and the faces that then have two identical corners
+come out without opening the surface. What the gate reads is what a slicer
+opens, down to the last decimal.
+
 ## The gate has a memory budget too, and it is easy to spend
 
 Checking a mesh costs more than holding it. The cowl's print mesh is 900 MB;

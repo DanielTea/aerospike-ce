@@ -29,6 +29,7 @@ actually shipped from this repository was downstream of a green suite:
 | 6,334 zero-area triangles in a published file | slicing — a triangle with no normal |
 | one pinch point in 24 million triangles | watertight caught it and could not say what it was — "not watertight, zero boundary edges"; slicing names it, and the Euler parity proves it |
 | a constant-thickness hollow that narrows as it rises | printability — a support inside a sealed cavity that nothing can reach |
+| 416 triangles with area in memory and none on disk | slicing — the only stage that reads the file rather than the mesh |
 
 Each was invisible to the stage above it and obvious to the stage below, and
 until now there was no stage below. So the gates run in the order the failure
@@ -135,6 +136,24 @@ Runs `test_print_ready`, then, on the meshes or on a written file:
 | solid is outward | positive enclosed volume, finite coordinates, indices in range | |
 | file states its unit | 3MF says millimetre | STL does not say anything, and every slicer guesses |
 | file carries every solid | all three objects arrived | |
+
+### The gap between the mesh and the file
+
+This stage is the only one that reads what was written rather than what was
+meant, and that is not a formality. 3MF carries coordinates as decimal text, so
+writing quantises; a triangle whose corners are closer together than the written
+quantum has area right up until it is written and none afterwards.
+
+It happened here. `mesh_solid.level_guard_mm` separates a marching-cubes vertex
+from its sample by about 1.5e-4 mm, and the writer used four decimals -- a
+tenth of a micron. The guard and the writer were arguing about the same decimal
+place, and the first file built with the guard in place reported no zero-area
+triangles anywhere in memory and came back off disk with 416.
+
+The fix was not only more decimals. The part is now snapped onto the write grid
+*before* it is checked and welded there, so the mesh the gate reads and the mesh
+a slicer opens are the same mesh down to the last decimal. More decimals alone
+would have made it rarer and left the gap open.
 
 Given `--file`, **both** mesh stages read the written file instead of meshing:
 every gate is then asked of exactly what a slicer would open, rather than of
