@@ -46,8 +46,9 @@ from __future__ import annotations
 import argparse
 import glob
 import json
-import math
 import os
+import shutil
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -298,7 +299,41 @@ def stage_geometry(design, spec) -> Stage:
     except (TypeError, ValueError) as exc:
         st.add("plan round-trips", False, f"{type(exc).__name__}: {exc}")
 
+    check_the_reader_compiles(st)
     return st
+
+
+def check_the_reader_compiles(st: Stage) -> None:
+    """
+    The other side of the seam still builds.
+
+    The C# derives no geometry -- that is the whole arrangement -- but it does
+    have to compile against the plan it reads, and a field renamed on this side
+    breaks it silently as far as pytest is concerned. Skipped, with the reason
+    said out loud, when the SDK or the vendored PicoGK is not on the machine:
+    a gate that quietly disappears is worse than one that is not there.
+    """
+    exe = shutil.which("dotnet")
+    proj = os.path.join(HERE, "..", "model", "AerospikeCE.csproj")
+    picogk = os.path.join(HERE, "..", "vendor", "PicoGK", "PicoGK.csproj")
+    if exe is None:
+        st.add("the C# reader compiles", True,
+               "no dotnet SDK here; not compiled", skipped=True)
+        return
+    if not os.path.exists(picogk):
+        st.add("the C# reader compiles", True,
+               "vendor/PicoGK is not checked out; git submodule update --init "
+               "--recursive", skipped=True)
+        return
+    try:
+        r = subprocess.run([exe, "build", proj, "--nologo", "-v", "q"],
+                           capture_output=True, text=True, timeout=1800)
+    except (OSError, subprocess.SubprocessError) as exc:
+        st.add("the C# reader compiles", False, f"{type(exc).__name__}: {exc}")
+        return
+    tail = (r.stdout + r.stderr).strip().splitlines()[-3:]
+    st.add("the C# reader compiles", r.returncode == 0,
+           "dotnet build clean" if r.returncode == 0 else " | ".join(tail))
 
 
 # --------------------------------------------------------------------------

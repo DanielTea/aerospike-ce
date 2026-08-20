@@ -69,6 +69,7 @@ Runs `test_engine`, `test_shell`, `test_manifolds`, `test_interfaces`,
 | plan covers every part | nothing silently dropped at the seam |
 | narrowest feature is real | the voxel size has something to be derived from |
 | plan round-trips | it survives JSON exactly, which is how the C# receives it |
+| the C# reader compiles | the other side of the seam still builds. Skipped, out loud, when the SDK or the vendored PicoGK is not on the machine -- a gate that quietly disappears is worse than one that was never there |
 
 ## Stage 3 — watertight
 

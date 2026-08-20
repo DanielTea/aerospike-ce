@@ -149,15 +149,87 @@ def revolve(profile: Profile, n_theta: int = 180, tol: float = 0.005):
 # mesh checks
 # --------------------------------------------------------------------------
 
+# Per-face vector maths is done a slice at a time. Gathering all three corners
+# of a twenty-four-million-triangle mesh costs 1.7 GB before any arithmetic
+# happens, and there are four routines here that want to do it; the print build
+# was killed by the kernel for the sum of them. A couple of million faces at a
+# time is large enough that the loop costs nothing measurable and small enough
+# that the working set stays in the tens of megabytes.
+FACE_CHUNK = 2_000_000
+
+
+def _face_slices(n: int, chunk: int = FACE_CHUNK):
+    for i in range(0, max(n, 1), chunk):
+        yield slice(i, min(i + chunk, n))
+
+
 def mesh_volume(v: np.ndarray, f: np.ndarray) -> float:
     """Signed volume by the divergence theorem, mm^3. Positive if outward."""
-    a, b, c = v[f[:, 0]], v[f[:, 1]], v[f[:, 2]]
-    return float(np.sum(np.einsum("ij,ij->i", a, np.cross(b, c))) / 6.0)
+    total = 0.0
+    for sl in _face_slices(len(f)):
+        g = f[sl]
+        a, b, c = v[g[:, 0]], v[g[:, 1]], v[g[:, 2]]
+        total += float(np.sum(np.einsum("ij,ij->i", a, np.cross(b, c))))
+    return total / 6.0
 
 
 def mesh_area(v: np.ndarray, f: np.ndarray) -> float:
-    a, b, c = v[f[:, 0]], v[f[:, 1]], v[f[:, 2]]
-    return float(np.sum(np.linalg.norm(np.cross(b - a, c - a), axis=1)) / 2.0)
+    total = 0.0
+    for sl in _face_slices(len(f)):
+        g = f[sl]
+        a, b, c = v[g[:, 0]], v[g[:, 1]], v[g[:, 2]]
+        total += float(np.sum(np.linalg.norm(np.cross(b - a, c - a), axis=1)))
+    return total / 2.0
+
+
+def face_area_stats(v: np.ndarray, f: np.ndarray):
+    """
+    How many triangles have no area, and how little the smallest one has.
+
+    Both come out of one pass and neither needs the areas kept: the count is
+    what the gate reads and the minimum is what tells you how close the rest
+    came.
+    """
+    zero, smallest = 0, np.inf
+    for sl in _face_slices(len(f)):
+        g = f[sl]
+        a, b, c = v[g[:, 0]], v[g[:, 1]], v[g[:, 2]]
+        area = 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)
+        zero += int(np.count_nonzero(area <= 0.0))
+        if len(area):
+            smallest = min(smallest, float(area.min()))
+    return zero, (0.0 if smallest is np.inf else smallest)
+
+
+def _edge_keys(f: np.ndarray) -> tuple[np.ndarray, int]:
+    """
+    Every edge of every triangle as one sorted integer, and the vertex count.
+
+    One int64 per edge rather than a pair, because `np.unique(..., axis=0)` on
+    a 72-million-row array of pairs views it as a void dtype and sorts that,
+    which costs several gigabytes of copies. Packing the two indices into one
+    integer -- they are both well under 2^31, so `lo * n + hi` is exact -- makes
+    it an ordinary 1-D sort that can be done in place.
+    """
+    n = int(f.max()) + 1 if len(f) else 1
+    key = np.empty(3 * len(f), dtype=np.int64)
+    m = len(f)
+    for k, (i, j) in enumerate(((0, 1), (1, 2), (2, 0))):
+        u = f[:, i].astype(np.int64, copy=False)
+        w = f[:, j].astype(np.int64, copy=False)
+        key[k * m:(k + 1) * m] = np.minimum(u, w) * n + np.maximum(u, w)
+    return key, n
+
+
+def _run_lengths(sorted_key: np.ndarray) -> np.ndarray:
+    """Length of each run of equal values in a sorted array."""
+    if not len(sorted_key):
+        return np.zeros(0, dtype=np.int64)
+    edges = np.flatnonzero(sorted_key[1:] != sorted_key[:-1]) + 1
+    bounds = np.empty(len(edges) + 2, dtype=np.int64)
+    bounds[0], bounds[-1] = 0, len(sorted_key)
+    bounds[1:-1] = edges
+    return np.diff(bounds)
 
 
 def manifold_report(v: np.ndarray, f: np.ndarray) -> dict:
@@ -176,11 +248,14 @@ def manifold_report(v: np.ndarray, f: np.ndarray) -> dict:
     missing or extraneous surfaces. They are counted here because the edge
     arithmetic passed a mesh that would not slice.
     """
-    e = np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]])
-    e = np.sort(e, axis=1)
-    uniq, counts = np.unique(e, axis=0, return_counts=True)
-    used = np.unique(f)
-    n_v, n_e, n_f = len(used), len(uniq), len(f)
+    key, n = _edge_keys(f)
+    key.sort()
+    counts = _run_lengths(key)
+    del key
+    # bincount rather than np.unique(f): it reads the faces once into n bins
+    # instead of sorting a 72-million-element copy of them.
+    n_v = int(np.count_nonzero(np.bincount(f.reshape(-1), minlength=n)))
+    n_e, n_f = len(counts), len(f)
     return {
         "vertices": n_v,
         "edges": n_e,
@@ -189,7 +264,7 @@ def manifold_report(v: np.ndarray, f: np.ndarray) -> dict:
         "watertight": bool(np.all(counts == 2)),
         "boundary_edges": int(np.sum(counts == 1)),
         "nonmanifold_edges": int(np.sum(counts > 2)),
-        "degenerate_faces": int(np.sum(_face_areas(v, f) <= 0.0)),
+        "degenerate_faces": face_area_stats(v, f)[0],
     }
 
 
@@ -210,9 +285,22 @@ def duplicate_faces(f: np.ndarray) -> int:
     happy. A slicer walking the surface arrives at the same place twice and
     disagrees with itself about which side is solid.
     """
-    key = np.sort(f, axis=1)
-    _, counts = np.unique(key, axis=0, return_counts=True)
-    return int(np.sum(counts) - len(counts))
+    if not len(f):
+        return 0
+    n = int(f.max()) + 1
+    a = f.astype(np.int64, copy=False)
+    lo = a.min(axis=1)
+    hi = a.max(axis=1)
+    mid = a.sum(axis=1) - lo - hi
+    # Two integers rather than a three-column sort, for the same reason the
+    # edges are packed: np.unique over rows views them as a void dtype and
+    # copies the lot. Three indices will not fit in one int64 at this vertex
+    # count, so it is a lexsort over two.
+    first = lo * n + mid
+    order = np.lexsort((hi, first))
+    same = (first[order][1:] == first[order][:-1]) & \
+           (hi[order][1:] == hi[order][:-1])
+    return int(np.count_nonzero(same))
 
 
 def inconsistent_edges(f: np.ndarray) -> int:
@@ -225,17 +313,35 @@ def inconsistent_edges(f: np.ndarray) -> int:
     mesh still closes, and the slicer reads solid and void the wrong way round
     across that patch.
     """
-    n = int(f.max()) + 1 if len(f) else 1
+    if not len(f):
+        return 0
     tail = f.reshape(-1)
     head = f[:, [1, 2, 0]].reshape(-1)
-    lo = np.minimum(tail, head).astype(np.int64)
-    hi = np.maximum(tail, head).astype(np.int64)
-    key = lo * n + hi
-    uniq, inverse, counts = np.unique(key, return_inverse=True, return_counts=True)
-    forward = np.bincount(inverse, weights=(tail < head).astype(np.float64),
-                          minlength=len(uniq))
-    interior = counts == 2
-    return int(np.sum(interior & (forward != 1.0)))
+    n = int(f.max()) + 1
+    key = np.minimum(tail, head).astype(np.int64) * n + \
+        np.maximum(tail, head).astype(np.int64)
+    forward = tail < head
+    order = np.argsort(key, kind="stable")
+    runs = _run_lengths(key[order])
+    two = _run_starts(runs)[runs == 2]
+    fwd = forward[order]
+    return int(np.count_nonzero(
+        fwd[two].astype(np.int8) + fwd[two + 1].astype(np.int8) != 1))
+
+
+def _run_starts(runs: np.ndarray) -> np.ndarray:
+    """Index at which each run begins."""
+    starts = np.empty(len(runs), dtype=np.int64)
+    if len(runs):
+        starts[0] = 0
+        np.cumsum(runs[:-1], out=starts[1:])
+    return starts
+
+
+def _next_corner(c: np.ndarray) -> np.ndarray:
+    """The corner after `c` in its own triangle, by arithmetic on the index."""
+    base = (c // 3) * 3
+    return (base + (c - base + 1) % 3).astype(np.int32, copy=False)
 
 
 def nonmanifold_vertices(f: np.ndarray) -> int:
@@ -249,9 +355,16 @@ def nonmanifold_vertices(f: np.ndarray) -> int:
 
     Counted by fans rather than by vertices. Around a manifold vertex the
     incident triangles form one closed ring; around a pinch they form two or
-    more. The triangle corners are the nodes and each shared edge joins the
-    two corners that sit on it, so the number of connected components is the
-    number of fans, and anything above one vertex apiece is a pinch.
+    more. The triangle corners are the nodes and each shared edge joins the two
+    corners that sit on it, so the number of connected components is the number
+    of fans, and anything above one apiece is a pinch.
+
+    Written to stay inside a few gigabytes at print resolution. The corner
+    indices are arithmetic rather than a stored array, the graph is int32 with
+    one entry per join rather than two, and everything is freed the moment it
+    stops being needed -- a twenty-four-million-triangle part took thirteen
+    gigabytes the obvious way, which is what the kernel killed the print build
+    for.
     """
     if not len(f):
         return 0
@@ -259,34 +372,33 @@ def nonmanifold_vertices(f: np.ndarray) -> int:
     n_he = 3 * len(f)
     tail = f.reshape(-1)
     head = f[:, [1, 2, 0]].reshape(-1)
-    corner_tail = np.arange(n_he, dtype=np.int64)
-    corner_head = np.arange(n_he, dtype=np.int64).reshape(-1, 3)[:, [1, 2, 0]].reshape(-1)
 
-    lo = np.minimum(tail, head).astype(np.int64)
-    hi = np.maximum(tail, head).astype(np.int64)
-    order = np.argsort(lo * n + hi, kind="stable")
-    key = (lo * n + hi)[order]
-    # consecutive half-edges sharing a key are the pair on that edge; anything
-    # shared by more or fewer than two faces is a manifold failure the edge
-    # count already reports, so it is left alone here.
-    pair = np.flatnonzero((key[:-1] == key[1:]) &
-                          np.concatenate(([True], key[:-1] != key[1:]))[:-1] &
-                          np.concatenate((key[1:] != key[:-1], [True]))[1:])
-    a, b = order[pair], order[pair + 1]
+    key = np.minimum(tail, head).astype(np.int64) * n + \
+        np.maximum(tail, head).astype(np.int64)
+    order = np.argsort(key, kind="stable").astype(np.int32)
+    runs = _run_lengths(key[order])
+    del key
+    starts = _run_starts(runs)
+    # Only edges shared by exactly two faces join anything. Anything else is a
+    # manifold failure the edge count already reports by itself.
+    two = starts[runs == 2]
+    del runs, starts
+    a, b = order[two], order[two + 1]
+    del order, two
 
-    same = tail[a] == tail[b]
-    rows = np.concatenate([
-        corner_tail[a], np.where(same, corner_tail[b], corner_head[b]),
-        corner_head[a], np.where(same, corner_head[b], corner_tail[b]),
-    ])
-    cols = np.concatenate([
-        np.where(same, corner_tail[b], corner_head[b]), corner_tail[a],
-        np.where(same, corner_head[b], corner_tail[b]), corner_head[a],
-    ])
+    same = tail[a] == tail[b]                     # do they enter from the same end
+    hb = _next_corner(b)
+    rows = np.concatenate([a, _next_corner(a)])
+    cols = np.concatenate([np.where(same, b, hb), np.where(same, hb, b)])
+    del a, b, same, hb
+
     g = coo_matrix((np.ones(len(rows), dtype=np.int8), (rows, cols)),
                    shape=(n_he, n_he))
+    del rows, cols
     fans, _ = connected_components(g, directed=False)
-    return int(fans - len(np.unique(f)))
+    del g
+    used = int(np.count_nonzero(np.bincount(f.reshape(-1), minlength=n)))
+    return int(fans - used)
 
 
 def slicing_report(v: np.ndarray, f: np.ndarray, deep: bool = True) -> dict:
@@ -305,13 +417,13 @@ def slicing_report(v: np.ndarray, f: np.ndarray, deep: bool = True) -> dict:
     the genus comparison already catches a new pinch, and turned on once per
     part before anything is written.
     """
-    areas = _face_areas(v, f)
+    zero_area, smallest = face_area_stats(v, f)
     return {
-        "degenerate_faces": int(np.sum(areas <= 0.0)),
+        "degenerate_faces": zero_area,
         "duplicate_faces": duplicate_faces(f),
         "inconsistent_edges": inconsistent_edges(f),
         "nonmanifold_vertices": nonmanifold_vertices(f) if deep else 0,
-        "min_face_area_mm2": float(areas.min()) if len(areas) else 0.0,
+        "min_face_area_mm2": smallest,
         "finite": bool(np.isfinite(v).all()),
         "indices_in_range": bool(len(f) == 0 or int(f.max()) < len(v)),
         "outward": bool(mesh_volume(v, f) > 0.0),

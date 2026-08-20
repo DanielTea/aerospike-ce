@@ -76,13 +76,30 @@ def surfaces(verts: np.ndarray, faces: np.ndarray):
     every hollow part ever printed; what actually matters is whether those
     cavities have a way out.
     """
-    e = np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
-    g = coo_matrix((np.ones(len(e)), (e[:, 0], e[:, 1])),
+    m = len(faces)
+    rows = np.empty(3 * m, dtype=np.int32)
+    cols = np.empty(3 * m, dtype=np.int32)
+    for k, (i, j) in enumerate(((0, 1), (1, 2), (2, 0))):
+        rows[k * m:(k + 1) * m] = faces[:, i]
+        cols[k * m:(k + 1) * m] = faces[:, j]
+    # int32 indices and int8 weights. At print resolution this graph has 72
+    # million entries in it, and the difference between that and the default
+    # int64/float64 is three gigabytes on a machine that has already been
+    # killed once for wanting them.
+    g = coo_matrix((np.ones(3 * m, dtype=np.int8), (rows, cols)),
                    shape=(len(verts), len(verts)))
-    n, label = connected_components(g, directed=False)
+    del rows, cols
+    _, label = connected_components(g, directed=False)
+    del g
+    per_face = label[faces[:, 0]]
+    marks = np.unique(per_face)
+    if len(marks) == 1:
+        # The ordinary case, and worth not gathering a copy of every triangle
+        # in the part to discover it.
+        return [(m, mesh_volume(verts, faces))]
     out = []
-    for k in range(n):
-        sub = faces[label[faces[:, 0]] == k]
+    for k in marks:
+        sub = faces[per_face == k]
         if len(sub):
             out.append((len(sub), mesh_volume(verts, sub)))
     return out
