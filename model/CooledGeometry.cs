@@ -48,6 +48,30 @@ namespace AerospikeCE
         public double XAt, RInner, ROuter, HalfX;
     }
 
+    /// <summary>
+    /// Stiffening ribs standing proud of a shell, one per cooling channel.
+    ///
+    /// They sit on the lands, where there is already material, and taper so
+    /// their flanks stand above the process angle. Several hundred marginal
+    /// overhangs is not a shell, it is a support problem with no way in.
+    /// </summary>
+    public sealed class RibAdd
+    {
+        public double[] BaseX = Array.Empty<double>();
+        public double[] BaseR = Array.Empty<double>();
+        public int Count;
+        public double HeightMm, RootWidthMm, FlankDeg, XStart, XEnd, Phase;
+        public bool Outward = true;
+    }
+
+    /// <summary>Splayed mounting legs, chamber down to a footed pad.</summary>
+    public sealed class LegAdd
+    {
+        public int Count;
+        public double XTop, RTop, XFoot, RFoot, ThicknessMm, HalfWidthDeg,
+                      PadRadiusMm, Phase;
+    }
+
     /// <summary>Radial pads at the head end, for bolting the engine down.</summary>
     public sealed class LugAdd
     {
@@ -77,6 +101,8 @@ namespace AerospikeCE
         private readonly List<RingBoss> _bosses;
         private readonly List<LugAdd> _lugs;
         private readonly List<PlenumCut> _plenums;
+        private readonly List<RibAdd> _ribs;
+        private readonly List<LegAdd> _legs;
         private readonly BBox3 _bounds;
 
         // Tabulated profile distance over (x, r). See the constructor.
@@ -91,6 +117,8 @@ namespace AerospikeCE
                           List<RingBoss>? bosses = null,
                           List<LugAdd>? lugs = null,
                           List<PlenumCut>? plenums = null,
+                          List<RibAdd>? ribs = null,
+                          List<LegAdd>? legs = null,
                           float fMarginMm = 1.0f,
                           double fTableStepMm = 0.05)
         {
@@ -101,6 +129,8 @@ namespace AerospikeCE
             _bosses = bosses ?? new();
             _lugs = lugs ?? new();
             _plenums = plenums ?? new();
+            _ribs = ribs ?? new();
+            _legs = legs ?? new();
 
             // The box has to cover material added outside the profile. Sizing it
             // from the meridional profile alone clips the mounting lugs at the
@@ -119,6 +149,19 @@ namespace AerospikeCE
                 x0 = Math.Min(x0, lg.XAt - lg.HalfX - fMarginMm);
                 x1 = Math.Max(x1, lg.XAt + lg.HalfX + fMarginMm);
                 rr = Math.Max(rr, lg.ROuter + fMarginMm);
+            }
+            foreach (var rb in _ribs)
+            {
+                x0 = Math.Min(x0, rb.XStart - fMarginMm);
+                x1 = Math.Max(x1, rb.XEnd + fMarginMm);
+                if (rb.Outward)
+                    rr = Math.Max(rr, rb.BaseR.Max() + rb.HeightMm + fMarginMm);
+            }
+            foreach (var lg in _legs)
+            {
+                x0 = Math.Min(x0, Math.Min(lg.XTop, lg.XFoot) - fMarginMm);
+                x1 = Math.Max(x1, Math.Max(lg.XTop, lg.XFoot) + fMarginMm);
+                rr = Math.Max(rr, Math.Max(lg.RFoot, lg.PadRadiusMm) + fMarginMm);
             }
             _bounds = new BBox3(new Vector3((float)-rr, (float)-rr, (float)x0),
                                 new Vector3((float)rr, (float)rr, (float)x1));
@@ -278,6 +321,47 @@ namespace AerospikeCE
                             Math.Abs(x - lg.XAt) - lg.HalfX);
         }
 
+        private static double RibDistance(double x, double r, double th, RibAdd rb)
+        {
+            double bas = Interp(rb.BaseX, rb.BaseR, x);
+            double sign = rb.Outward ? 1.0 : -1.0;
+            double h = sign * (r - bas);
+            double dRadial = Math.Max(-h, h - rb.HeightMm);
+
+            double shrink = h / Math.Max(Math.Tan(rb.FlankDeg * Math.PI / 180.0), 1e-6);
+            double halfArc = Math.Max(0.5 * rb.RootWidthMm - shrink, 0.0);
+
+            double pitch = 2.0 * Math.PI / rb.Count;
+            double rel = th - rb.Phase;
+            double local = rel - pitch * Math.Floor(rel / pitch + 0.5);
+            double dTheta = Math.Abs(local) * Math.Max(r, 1e-6) - halfArc;
+
+            return Math.Max(Math.Max(dRadial, dTheta),
+                            Math.Max(rb.XStart - x, x - rb.XEnd));
+        }
+
+        private static double LegDistance(double x, double r, double th, LegAdd lg)
+        {
+            double span = lg.XFoot - lg.XTop;
+            double t = Math.Clamp((x - lg.XTop) / (Math.Abs(span) > 1e-9 ? span : 1e-9),
+                                  0.0, 1.0);
+            double rMid = lg.RTop + t * (lg.RFoot - lg.RTop);
+
+            double pitch = 2.0 * Math.PI / lg.Count;
+            double rel = th - lg.Phase;
+            double local = rel - pitch * Math.Floor(rel / pitch + 0.5);
+            double dTheta = (Math.Abs(local) - lg.HalfWidthDeg * Math.PI / 180.0)
+                            * Math.Max(r, 1e-6);
+
+            double lo = Math.Min(lg.XTop, lg.XFoot), hi = Math.Max(lg.XTop, lg.XFoot);
+            double strut = Math.Max(Math.Max(dTheta, Math.Abs(r - rMid) - 0.5 * lg.ThicknessMm),
+                                    Math.Max(lo - x, x - hi));
+
+            double pad = Math.Max(Math.Max(lo - x, x - (lo + lg.ThicknessMm)),
+                                  Math.Max(dTheta, Math.Max(lg.RTop - r, r - lg.PadRadiusMm)));
+            return Math.Min(strut, pad);
+        }
+
         public float fSignedDistance(in Vector3 vec)
         {
             double x = vec.Z;                       // model x is PicoGK Z
@@ -291,6 +375,8 @@ namespace AerospikeCE
             // a lug or a plenum inside a boss cuts the metal just placed rather
             // than the air where it used to be.
             foreach (var b in _bosses) d = Math.Min(d, RingBossDistance(x, r, b));
+            foreach (var rb in _ribs) d = Math.Min(d, RibDistance(x, r, th, rb));
+            foreach (var lg in _legs) d = Math.Min(d, LegDistance(x, r, th, lg));
             foreach (var lg in _lugs) d = Math.Min(d, LugDistance(x, r, th, lg));
             foreach (var p in _plenums) d = Math.Max(d, -PlenumDistance(x, r, p));
             foreach (var c in _channels) d = Math.Max(d, -ChannelDistance(x, r, th, c));
