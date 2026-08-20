@@ -151,6 +151,41 @@ class RingBoss:
 
 
 @dataclass(frozen=True)
+class RibAdd:
+    """
+    Stiffening ribs standing proud of a shell, one per cooling channel.
+
+    They sit on the lands, which is where there is already material, and taper
+    so their flanks stand above the process angle -- several hundred marginal
+    overhangs is not a shell, it is a support problem.
+    """
+    base_x: np.ndarray
+    base_r: np.ndarray
+    count: int
+    height_mm: float
+    root_width_mm: float
+    flank_deg: float
+    x_start: float
+    x_end: float
+    outward: bool = True
+    phase: float = 0.0
+
+
+@dataclass(frozen=True)
+class LegAdd:
+    """One ring of splayed mounting legs, chamber down to a footed pad."""
+    count: int
+    x_top: float
+    r_top: float
+    x_foot: float
+    r_foot: float
+    thickness_mm: float
+    half_width_deg: float
+    pad_radius_mm: float
+    phase: float = 0.0
+
+
+@dataclass(frozen=True)
 class LugAdd:
     """A ring of mounting lugs: radial pads at the head end."""
     count: int
@@ -239,6 +274,48 @@ def _lug_sdf(X, R, TH, lug: LugAdd) -> np.ndarray:
     return np.maximum(np.maximum(d_theta, d_r), d_x).astype(np.float32)
 
 
+def _rib_sdf(X, R, TH, rib: RibAdd) -> np.ndarray:
+    """Distance to the nearest rib. Negative inside."""
+    base = np.interp(X, rib.base_x, rib.base_r).astype(np.float32)
+    sign = 1.0 if rib.outward else -1.0
+    h = sign * (R - base)                       # height above the shell
+    d_radial = np.maximum(-h, h - rib.height_mm)
+
+    # the rib narrows with height, so its flanks stand at flank_deg
+    shrink = h / max(math.tan(math.radians(rib.flank_deg)), 1e-6)
+    half_arc = np.maximum(0.5 * rib.root_width_mm - shrink, 0.0)
+
+    pitch = 2.0 * math.pi / rib.count
+    local = np.mod(TH - rib.phase + 0.5 * pitch, pitch) - 0.5 * pitch
+    d_theta = np.abs(local) * np.maximum(R, 1e-6) - half_arc
+
+    d_axial = np.maximum(rib.x_start - X, X - rib.x_end)
+    return np.maximum(np.maximum(d_radial, d_theta), d_axial).astype(np.float32)
+
+
+def _leg_sdf(X, R, TH, leg: LegAdd) -> np.ndarray:
+    """Distance to the nearest splayed leg, foot pad included. Negative inside."""
+    span = leg.x_foot - leg.x_top
+    t = np.clip((X - leg.x_top) / (span if abs(span) > 1e-9 else 1e-9), 0.0, 1.0)
+    r_mid = leg.r_top + t * (leg.r_foot - leg.r_top)
+
+    pitch = 2.0 * math.pi / leg.count
+    local = np.mod(TH - leg.phase + 0.5 * pitch, pitch) - 0.5 * pitch
+    d_theta = (np.abs(local) - math.radians(leg.half_width_deg)) * np.maximum(R, 1e-6)
+
+    d_radial = np.abs(R - r_mid) - 0.5 * leg.thickness_mm
+    lo, hi = min(leg.x_top, leg.x_foot), max(leg.x_top, leg.x_foot)
+    d_axial = np.maximum(lo - X, X - hi)
+    strut = np.maximum(np.maximum(d_theta, d_radial), d_axial)
+
+    # the foot: a pad at the bottom, wide enough to take a fixing
+    pad_lo = min(leg.x_top, leg.x_foot)
+    d_pad = np.maximum(np.maximum(pad_lo - X, X - (pad_lo + leg.thickness_mm)),
+                       np.maximum(d_theta, np.maximum(leg.r_top - R,
+                                                      R - leg.pad_radius_mm)))
+    return np.minimum(strut, d_pad).astype(np.float32)
+
+
 def _hole_sdf(X, Y, Z, cut: HoleCut) -> np.ndarray:
     """Signed distance to the nearest hole of the ring."""
     th = np.arctan2(Z, Y)
@@ -277,6 +354,8 @@ def build_field(
     bosses: list[RingBoss] | None = None,
     lugs: list[LugAdd] | None = None,
     plenums: list[PlenumCut] | None = None,
+    ribs: list[RibAdd] | None = None,
+    legs: list[LegAdd] | None = None,
 ):
     """
     Signed distance field of one part, with its features subtracted.
@@ -291,8 +370,10 @@ def build_field(
     bosses = bosses or []
     lugs = lugs or []
     plenums = plenums or []
+    ribs = ribs or []
+    legs = legs or []
 
-    x0, x1, r_max = _feature_extent(profile, margin_mm, bosses, lugs)
+    x0, x1, r_max = _feature_extent(profile, margin_mm, bosses, lugs, ribs, legs)
 
     nx = max(2, int(math.ceil((x1 - x0) / voxel_mm)) + 1)
     ny = max(2, int(math.ceil(2.0 * r_max / voxel_mm)) + 1)
@@ -312,6 +393,10 @@ def build_field(
         d = _polygon_sdf(X, R, vx, vr)
         for b in bosses:
             d = np.minimum(d, _ring_boss_sdf(X, R, b))
+        for rb in ribs:
+            d = np.minimum(d, _rib_sdf(X, R, TH, rb))
+        for lgg in legs:
+            d = np.minimum(d, _leg_sdf(X, R, TH, lgg))
         for lg in lugs:
             d = np.minimum(d, _lug_sdf(X, R, TH, lg))
         for pl in plenums:
@@ -340,7 +425,7 @@ def mesh_field(field: np.ndarray, origin, voxel_mm: float):
     return verts, faces.astype(np.int64)
 
 
-def _feature_extent(profile, margin_mm, bosses, lugs):
+def _feature_extent(profile, margin_mm, bosses, lugs, ribs=None, legs=None):
     """
     Bounding extent of the part *including* material added outside its profile.
 
@@ -360,6 +445,15 @@ def _feature_extent(profile, margin_mm, bosses, lugs):
         x0 = min(x0, lg.x_at - lg.half_x - margin_mm)
         x1 = max(x1, lg.x_at + lg.half_x + margin_mm)
         r_max = max(r_max, lg.r_outer + margin_mm)
+    for rb in ribs or []:
+        x0 = min(x0, rb.x_start - margin_mm)
+        x1 = max(x1, rb.x_end + margin_mm)
+        if rb.outward:
+            r_max = max(r_max, float(np.max(rb.base_r)) + rb.height_mm + margin_mm)
+    for lg in legs or []:
+        x0 = min(x0, min(lg.x_top, lg.x_foot) - margin_mm)
+        x1 = max(x1, max(lg.x_top, lg.x_foot) + margin_mm)
+        r_max = max(r_max, max(lg.r_foot, lg.pad_radius_mm) + margin_mm)
     return x0, x1, r_max
 
 
@@ -373,10 +467,12 @@ def build_mesh(
     bosses: list[RingBoss] | None = None,
     lugs: list[LugAdd] | None = None,
     plenums: list[PlenumCut] | None = None,
+    ribs: list[RibAdd] | None = None,
+    legs: list[LegAdd] | None = None,
 ):
     field, origin, spacing = build_field(
         profile, voxel_mm, channels, holes, cut_sector=cut_sector, ports=ports,
-        bosses=bosses, lugs=lugs, plenums=plenums)
+        bosses=bosses, lugs=lugs, plenums=plenums, ribs=ribs, legs=legs)
     return mesh_field(field, origin, spacing)
 
 
@@ -580,6 +676,8 @@ def build_mesh_streaming(
     bosses: list[RingBoss] | None = None,
     lugs: list[LugAdd] | None = None,
     plenums: list[PlenumCut] | None = None,
+    ribs: list[RibAdd] | None = None,
+    legs: list[LegAdd] | None = None,
 ):
     """
     Marching cubes over the volume in slabs, welded into one mesh.
@@ -599,8 +697,10 @@ def build_mesh_streaming(
     bosses = bosses or []
     lugs = lugs or []
     plenums = plenums or []
+    ribs = ribs or []
+    legs = legs or []
 
-    x0, x1, r_max = _feature_extent(profile, margin_mm, bosses, lugs)
+    x0, x1, r_max = _feature_extent(profile, margin_mm, bosses, lugs, ribs, legs)
 
     # The grid must step by exactly voxel_mm, not by a linspace interval that
     # merely averages to it. marching_cubes is told the spacing separately, so
@@ -649,6 +749,10 @@ def build_mesh_streaming(
         # was just put there rather than the air where it used to be.
         for b in bosses:
             d = np.minimum(d, _ring_boss_sdf(X, R, b))
+        for rb in ribs:
+            d = np.minimum(d, _rib_sdf(X, R, TH, rb))
+        for lgg in legs:
+            d = np.minimum(d, _leg_sdf(X, R, TH, lgg))
         for lg in lugs:
             d = np.minimum(d, _lug_sdf(X, R, TH, lg))
         for pl in plenums:

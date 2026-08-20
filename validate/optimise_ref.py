@@ -418,10 +418,24 @@ def main() -> None:
     ap.add_argument("--thrust-floor", type=float, default=0.0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--workers", type=int, default=0)
+    ap.add_argument("--pareto", default="",
+                    help="comma-separated objectives for a multi-objective run")
     args = ap.parse_args()
 
     with open(args.spec, encoding="utf-8") as fh:
         spec = json.load(fh)
+
+    if args.pareto:
+        names = tuple(n.strip() for n in args.pareto.split(","))
+        print(f"optimising {spec.get('name', 'engine')} for {' vs '.join(names)}"
+              + (f", thrust floor {args.thrust_floor:.0f} N" if args.thrust_floor else ""))
+        front = evolve_pareto(spec, objectives=names, generations=args.generations,
+                              mu=max(args.mu, 12), lam=args.lam,
+                              thrust_floor_n=args.thrust_floor, seed=args.seed,
+                              workers=args.workers or None)
+        print()
+        print(describe_front(front, names))
+        return
 
     print(f"optimising {spec.get('name', 'engine')} for {args.objective}"
           + (f", thrust floor {args.thrust_floor:.0f} N" if args.thrust_floor else ""))
@@ -437,6 +451,232 @@ def main() -> None:
         with open(args.out, "w", encoding="utf-8") as fh:
             json.dump(best, fh, indent=2)
         print(f"\nwrote {args.out}")
+
+
+
+
+# --------------------------------------------------------------------------
+# is the answer the physics, or the box?
+# --------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class BoundFinding:
+    gene: str
+    value: float
+    limit: float
+    at: str                     # "lower" or "upper"
+
+
+def bounds_report(unit: np.ndarray, genes=DEFAULT_GENES,
+                  tol: float = 0.01) -> list:
+    """
+    Which variables finished pinned against their limits.
+
+    This matters more than the objective value. A search that ends hard against
+    a bound has not found an optimum, it has found the edge of the box someone
+    drew -- the answer is a statement about the bounds, not about the engine,
+    and it will keep moving if they are widened. Reporting it is the difference
+    between an optimiser and an oracle.
+    """
+    out: list[BoundFinding] = []
+    for gene, u in zip(genes, np.atleast_1d(unit)):
+        if u <= tol:
+            out.append(BoundFinding(gene.path, gene.decode(u), gene.lo, "lower"))
+        elif u >= 1.0 - tol:
+            out.append(BoundFinding(gene.path, gene.decode(u), gene.hi, "upper"))
+    return out
+
+
+# --------------------------------------------------------------------------
+# more than one objective
+# --------------------------------------------------------------------------
+
+OBJECTIVES = {
+    "isp_sl": "max", "isp_vac": "max",
+    "thrust_sl": "max", "thrust_vac": "max",
+    "thrust_to_mass": "max",
+    "mass_kg": "min", "heat_kw": "min",
+    "length_mm": "min", "diameter_mm": "min",
+}
+
+
+def dominates(a: Evaluation, b: Evaluation, objectives: list) -> bool:
+    """
+    Pareto dominance, with feasibility taking precedence over everything.
+
+    Deb's rules first -- a feasible design dominates an infeasible one whatever
+    its objectives, and between two infeasible ones the smaller violation wins.
+    Only among feasible designs does dominance mean what it usually means: no
+    worse anywhere, better somewhere.
+    """
+    if a.feasible != b.feasible:
+        return a.feasible
+    if not a.feasible:
+        return a.violation < b.violation
+
+    better_somewhere = False
+    for name in objectives:
+        sign = 1.0 if OBJECTIVES[name] == "max" else -1.0
+        av, bv = sign * a.metrics.get(name, -math.inf), sign * b.metrics.get(name, -math.inf)
+        if av < bv:
+            return False
+        if av > bv:
+            better_somewhere = True
+    return better_somewhere
+
+
+def nondominated_fronts(pop: list, objectives: list) -> list:
+    """Sort a population into successive Pareto fronts."""
+    # Identity, not equality. Evaluation is a dataclass holding a numpy array,
+    # so `p in front` compares arrays elementwise and raises on the ambiguous
+    # truth value -- and if the array were scalar it would silently drop distinct
+    # individuals that happened to match.
+    fronts: list[list] = []
+    remaining = list(pop)
+    while remaining:
+        front = [p for p in remaining
+                 if not any(dominates(q, p, objectives) for q in remaining if q is not p)]
+        if not front:                       # cycles cannot happen, but do not hang
+            front = list(remaining)
+        fronts.append(front)
+        chosen = {id(p) for p in front}
+        remaining = [p for p in remaining if id(p) not in chosen]
+    return fronts
+
+
+def crowding_distance(front: list, objectives: list) -> dict:
+    """
+    Spacing measure, so a front stays spread instead of clustering.
+
+    Without it a multi-objective search converges onto whichever corner of the
+    front it happens to reach first, and reports a "trade-off" containing three
+    nearly identical designs.
+    """
+    dist = {id(p): 0.0 for p in front}
+    if len(front) <= 2:
+        return {id(p): math.inf for p in front}
+
+    for name in objectives:
+        ordered = sorted(front, key=lambda p: p.metrics.get(name, 0.0))
+        lo = ordered[0].metrics.get(name, 0.0)
+        hi = ordered[-1].metrics.get(name, 0.0)
+        span = hi - lo
+        dist[id(ordered[0])] = math.inf
+        dist[id(ordered[-1])] = math.inf
+        if span <= 0.0:
+            continue
+        for i in range(1, len(ordered) - 1):
+            step = (ordered[i + 1].metrics.get(name, 0.0)
+                    - ordered[i - 1].metrics.get(name, 0.0))
+            dist[id(ordered[i])] += step / span
+    return dist
+
+
+def evolve_pareto(
+    spec: dict,
+    objectives: tuple = ("isp_sl", "mass_kg"),
+    genes=DEFAULT_GENES,
+    mu: int = 16,
+    lam: int = 32,
+    generations: int = 20,
+    thrust_floor_n: float = 0.0,
+    seed: int = 0,
+    workers: int | None = None,
+    sigma0: float = 0.22,
+    verbose: bool = True,
+) -> list:
+    """
+    Multi-objective search, returning the non-dominated front.
+
+    A single objective forces a trade nobody agreed to. Maximising specific
+    impulse alone drove chamber pressure to its ceiling and left mass to fall
+    where it may; the honest output is the set of designs where you cannot
+    improve one thing without giving up another, and a person picks from it.
+
+    Selection is NSGA-II's: sort into fronts, fill by front, and break the last
+    front by crowding distance so the answer stays spread rather than clustering
+    in one corner.
+    """
+    for name in objectives:
+        if name not in OBJECTIVES:
+            raise ValueError(f"unknown objective '{name}'; know {sorted(OBJECTIVES)}")
+
+    rng = np.random.default_rng(seed)
+    n = len(genes)
+    tau = 1.0 / math.sqrt(2.0 * math.sqrt(n))
+    tau0 = 1.0 / math.sqrt(2.0 * n)
+    objectives = list(objectives)
+
+    from multiprocessing import Pool
+    workers = workers or max(1, min(12, (os.cpu_count() or 2) - 2))
+
+    def run(units):
+        payload = [(spec, genes, u, objectives[0], thrust_floor_n) for u in units]
+        if workers == 1:
+            return [_worker(p) for p in payload]
+        with Pool(workers) as pool:
+            return pool.map(_worker, payload)
+
+    units = [read_genome(spec, genes)] + [rng.random(n) for _ in range(mu - 1)]
+    parents = run(units)
+    for p, u in zip(parents, units):
+        p.sigma = np.full(n, sigma0)
+
+    for gen in range(generations):
+        kids_units, kids_sigma = [], []
+        for _ in range(lam):
+            i = rng.integers(0, len(parents))
+            s = parents[i].sigma * np.exp(tau0 * rng.normal() + tau * rng.normal(size=n))
+            s = np.clip(s, 1e-3, 0.5)
+            kids_units.append(np.clip(parents[i].unit + s * rng.normal(size=n), 0.0, 1.0))
+            kids_sigma.append(s)
+        kids = run(kids_units)
+        for k, s in zip(kids, kids_sigma):
+            k.sigma = s
+
+        pool_all = parents + kids
+        chosen: list = []
+        for front in nondominated_fronts(pool_all, objectives):
+            if len(chosen) + len(front) <= mu:
+                chosen.extend(front)
+                continue
+            dist = crowding_distance(front, objectives)
+            front.sort(key=lambda p: dist[id(p)], reverse=True)
+            chosen.extend(front[: mu - len(chosen)])
+            break
+        parents = chosen
+
+        if verbose:
+            feasible = [p for p in parents if p.feasible]
+            best = nondominated_fronts(parents, objectives)[0]
+            print(f"  gen {gen + 1:3d}/{generations}  front {len(best):3d}  "
+                  f"feasible {len(feasible):3d}/{len(parents)}", flush=True)
+
+    return nondominated_fronts(parents, objectives)[0]
+
+
+def describe_front(front: list, objectives: tuple, genes=DEFAULT_GENES) -> str:
+    """The trade-off, plus a note on any variable that finished on its bound."""
+    names = list(objectives)
+    rows = [f"{len(front)} non-dominated designs",
+            "  " + "  ".join(f"{n:>14s}" for n in names)]
+    ordered = sorted(front, key=lambda p: p.metrics.get(names[0], 0.0),
+                     reverse=OBJECTIVES[names[0]] == "max")
+    for p in ordered:
+        rows.append("  " + "  ".join(f"{p.metrics.get(n, float('nan')):14.3f}"
+                                     for n in names))
+
+    pinned: dict = {}
+    for p in front:
+        for b in bounds_report(p.unit, genes):
+            pinned.setdefault(b.gene, set()).add(b.at)
+    if pinned:
+        rows.append("")
+        rows.append("  variables finishing on their bounds -- the box is answering, "
+                    "not the physics:")
+        for gene, ends in sorted(pinned.items()):
+            rows.append(f"    {gene:36s} at its {', '.join(sorted(ends))} limit")
+    return "\n".join(rows)
 
 
 if __name__ == "__main__":

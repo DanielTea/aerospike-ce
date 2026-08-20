@@ -28,6 +28,7 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection  # noqa: E402
 
 from engine_design import design_engine  # noqa: E402
 from manifold_ref import design_manifolds, geometry_features  # noqa: E402
+from shell_ref import shell_features  # noqa: E402
 from mesh_solid import (  # noqa: E402
     build_mesh_streaming,
     centrebody_channels,
@@ -44,10 +45,14 @@ _FEATURE_CACHE: dict = {}
 
 
 def _features(design):
-    """Manifold and mount geometry, computed once per design."""
+    """Manifold, mount and shell geometry, computed once per design."""
     key = id(design)
     if key not in _FEATURE_CACHE:
-        _FEATURE_CACHE[key] = geometry_features(design, design_manifolds(design))
+        gf = geometry_features(design, design_manifolds(design))
+        shell, _, _ = shell_features(design)
+        for part, feats in shell.items():
+            gf.setdefault(part, {}).update(feats)
+        _FEATURE_CACHE[key] = gf
     return _FEATURE_CACHE[key]
 
 
@@ -78,7 +83,8 @@ def build_parts(design, voxel_mm: float, sweep_deg: float, target_tris: int,
                 a.profiles[part], voxel_mm=voxel_mm,
                 channels=ch, ports=pt, holes=hl,
                 bosses=gf.get("bosses"), lugs=gf.get("lugs"),
-                plenums=gf.get("plenums"),
+                plenums=gf.get("plenums"), ribs=gf.get("ribs"),
+                legs=gf.get("legs"),
                 cut_sector=None if keep_sector else sector,
                 keep_sector=keep_sector, x_window=x_window)
         except ValueError:
