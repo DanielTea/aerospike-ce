@@ -16,7 +16,18 @@ It is a release asset rather than a file in the tree because it is 409 MB, and
 a generated artifact of that size does not belong in git history. The thing
 worth versioning is the generator, which is here.
 
-Build and check it with:
+**Or let CI build it for you.** The `print file` workflow builds it, runs the
+release gate on the written file, and attaches it to its own run, so it can be
+downloaded from the Actions tab without anyone needing release permissions or
+409 MB of git history. It takes about an hour and it will not upload a file
+that failed its own gate.
+
+```bash
+gh workflow run "print file"            # once this is on the default branch
+git tag print-$(git rev-parse --short HEAD) && git push origin --tags   # before that
+```
+
+Build it locally with:
 
 ```bash
 cd validate

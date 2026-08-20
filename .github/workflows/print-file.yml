@@ -1,0 +1,116 @@
+name: print file
+
+# Build the print file and hand it back as a downloadable artifact.
+#
+# It is 409 MB, which is too big for git and does not belong in history anyway:
+# the generator is the thing worth versioning. A release asset is the natural
+# home for it, but publishing one needs permissions a CI job should not have --
+# so the job builds it, gates it, and attaches it to its own run. Anyone with
+# access to the repository can download it from the run page, and turning it
+# into a release afterwards is one command with the file in hand.
+#
+# Run it from the Actions tab once this is on the default branch, or:
+#   gh workflow run "print file" -f spec=spec/regen.json
+#
+# Before it is on the default branch, workflow_dispatch has nothing to
+# dispatch: GitHub only registers a dispatchable workflow from the default
+# branch. Pushing a `print-*` tag runs it from whatever commit the tag points
+# at, which is also the honest way to ask for the file belonging to one exact
+# revision:
+#   git tag print-$(git rev-parse --short HEAD) && git push origin --tags
+#
+# Takes about an hour. Meshing at the print voxel is 35 minutes of it and the
+# gate is another five; the rest is the decimation ladder, which is checked at
+# every rung and stops at the last one that survived.
+
+on:
+  push:
+    tags: ["print-*"]
+  workflow_dispatch:
+    inputs:
+      spec:
+        description: "spec to build, relative to the repository root"
+        default: spec/regen.json
+      retention_days:
+        description: "days to keep the artifact"
+        default: "30"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: validate/requirements.txt
+
+      - name: install
+        run: pip install -r validate/requirements.txt
+
+      # The spec comes from a workflow input, so it goes through the
+      # environment rather than being interpolated into the command.
+      - name: build
+        working-directory: validate
+        env:
+          SPEC: ${{ inputs.spec || 'spec/regen.json' }}
+        run: python print_ready.py --spec "../$SPEC" --out ../docs/print
+
+      - name: gate
+        working-directory: validate
+        run: python pipeline.py --file "$(ls ../docs/print/*.3mf | head -1)" \
+               --json ../out/release.json
+
+      - name: summary
+        if: always()
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import glob, json, os
+          f = sorted(glob.glob("docs/print/*.3mf"))
+          print("## Print file\n")
+          if f:
+              print(f"`{os.path.basename(f[0])}` — {os.path.getsize(f[0]) / 1e6:.1f} MB\n")
+          try:
+              d = json.load(open("out/release.json"))
+          except OSError:
+              print("No report: the build refused to write, or never got that far.")
+              raise SystemExit
+          print(f"Release gate: **{'PASS' if d['ok'] else 'FAIL'}**\n")
+          print("| stage | result | checks | seconds |")
+          print("|---|---|---|---|")
+          for s in d["stages"]:
+              print(f"| {s['name']} | {'ok' if s['ok'] else '**FAIL**'} "
+                    f"| {len(s['checks'])} | {s['seconds']:.0f} |")
+          bad = [c for s in d["stages"] for c in s["checks"]
+                 if not c["ok"] and not c["skipped"]]
+          if bad:
+              print("\n### Failed\n")
+              for c in bad:
+                  print(f"- **{c['name']}** — {c['detail']}")
+          PY
+
+      # The file goes out only if the gate passed. A print file that failed its
+      # own checks is exactly what this repository refuses to hand anyone.
+      - name: upload the print file
+        uses: actions/upload-artifact@v4
+        with:
+          name: print-file
+          path: docs/print/*.3mf
+          retention-days: ${{ inputs.retention_days || 30 }}
+          compression-level: 0        # 3MF is already a zip
+          if-no-files-found: error
+
+      - name: upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-report
+          path: out/release.json
+          retention-days: ${{ inputs.retention_days || 30 }}
+          if-no-files-found: warn
