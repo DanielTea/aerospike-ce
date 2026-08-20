@@ -20,6 +20,15 @@ chamber acoustic modes, and the thrust coefficient against altitude.
 
 Built on [PicoGK](https://picogk.org) and the LEAP 71 ShapeKernel, both Apache-2.0.
 
+## The printable engine
+
+[regen-spike-75.3mf](https://github.com/DanielTea/aerospike-ce/releases/download/v0.1.0/regen-spike-75.3mf)
+— three solids, 21.8 million triangles, 21.8 kg in GRCop-42, meshed at 0.233 mm
+with all 556 cooling channels and 96 injector orifices in it. Every part
+watertight, no cavity without a way out, and the head's genus checked against
+the handles its features imply. See [docs/print](docs/print/README.md) for what
+is checked, what is not, and what is wrong with the head manifolds.
+
 ## What this is and is not
 
 **Is:** a working skeleton of the paradigm. Descriptive input, codified

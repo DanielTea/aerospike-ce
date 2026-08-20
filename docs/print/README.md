@@ -4,6 +4,13 @@ A checked, print-resolution model of the whole engine: three solids in one 3MF,
 dimensioned in millimetres, with every cooling channel, injector orifice and
 mounting hole in it.
 
+**Download:** [regen-spike-75.3mf](https://github.com/DanielTea/aerospike-ce/releases/download/v0.1.0/regen-spike-75.3mf)
+(238 MiB, from the [v0.1.0 release](https://github.com/DanielTea/aerospike-ce/releases/tag/v0.1.0))
+
+It is a release asset rather than a file in the tree because it is 249 MB, and
+a generated artifact of that size does not belong in git history. The thing
+worth versioning is the generator, which is here.
+
 Regenerate with:
 
 ```bash
