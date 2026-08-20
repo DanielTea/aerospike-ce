@@ -722,30 +722,39 @@ def read_3mf(path: str) -> dict:
     millions of elements and about a gigabyte of XML once decompressed; running
     a regex over that as one string needs several gigabytes to answer a
     question that only ever needs one element at a time.
+
+    Accumulated into `array.array` rather than a list of tuples, for the same
+    reason. A Python tuple of three ints is about 156 bytes; twenty million
+    triangles of them is three gigabytes before numpy sees any of it, and the
+    point of reading the file back is to be able to check it on the machine
+    that wrote it.
     """
     import xml.etree.ElementTree as ET
     import zipfile
+    from array import array
 
     out: dict = {"unit": None, "objects": {}}
     with zipfile.ZipFile(path) as z, z.open("3D/3dmodel.model") as fh:
-        name, vx, tri = None, [], []
+        name, vx, tri = None, array("d"), array("q")
         for event, el in ET.iterparse(fh, events=("start", "end")):
             tag = el.tag.rsplit("}", 1)[-1]
             if event == "start":
                 if tag == "model":
                     out["unit"] = el.get("unit")
                 elif tag == "object":
-                    name, vx, tri = el.get("name"), [], []
+                    name, vx, tri = el.get("name"), array("d"), array("q")
                 continue
             if tag == "vertex":
-                vx.append((float(el.get("x")), float(el.get("y")), float(el.get("z"))))
+                vx.extend((float(el.get("x")), float(el.get("y")),
+                           float(el.get("z"))))
             elif tag == "triangle":
-                tri.append((int(el.get("v1")), int(el.get("v2")), int(el.get("v3"))))
+                tri.extend((int(el.get("v1")), int(el.get("v2")),
+                            int(el.get("v3"))))
             elif tag == "object":
                 out["objects"][name] = (
-                    np.asarray(vx, dtype=float).reshape(-1, 3),
-                    np.asarray(tri, dtype=np.int64).reshape(-1, 3))
-                name, vx, tri = None, [], []
+                    np.frombuffer(vx, dtype=np.float64).reshape(-1, 3).copy(),
+                    np.frombuffer(tri, dtype=np.int64).reshape(-1, 3).copy())
+                name, vx, tri = None, array("d"), array("q")
             # Elements are dropped as they close; kept, the tree grows back into
             # the whole file and the streaming buys nothing.
             el.clear()
