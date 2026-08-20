@@ -23,8 +23,9 @@ downloaded from the Actions tab without anyone needing release permissions or
 that failed its own gate.
 
 ```bash
-gh workflow run "print file"            # once this is on the default branch
-git tag print-$(git rev-parse --short HEAD) && git push origin --tags   # before that
+gh workflow run "print file"                    # once this is on the default branch
+git tag print-$(git rev-parse --short HEAD) && git push origin --tags
+git push -f origin HEAD:build-print-file        # where tags are not allowed
 ```
 
 Build it locally with:

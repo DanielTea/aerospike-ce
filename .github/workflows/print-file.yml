@@ -14,10 +14,15 @@ name: print file
 #
 # Before it is on the default branch, workflow_dispatch has nothing to
 # dispatch: GitHub only registers a dispatchable workflow from the default
-# branch. Pushing a `print-*` tag runs it from whatever commit the tag points
-# at, which is also the honest way to ask for the file belonging to one exact
-# revision:
+# branch. Two ways round that, and they run the same job on whatever commit
+# they point at:
+#
 #   git tag print-$(git rev-parse --short HEAD) && git push origin --tags
+#   git push -f origin HEAD:build-print-file
+#
+# The branch is there because some environments are not allowed to push tags --
+# creating one is how a release gets made, so it is often refused alongside
+# them. Force-pushing the branch is fine: it is a button, not a history.
 #
 # Takes about an hour. Meshing at the print voxel is 35 minutes of it and the
 # gate is another five; the rest is the decimation ladder, which is checked at
@@ -26,6 +31,7 @@ name: print file
 on:
   push:
     tags: ["print-*"]
+    branches: ["build-print-file"]
   workflow_dispatch:
     inputs:
       spec:
