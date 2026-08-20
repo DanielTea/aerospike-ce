@@ -551,7 +551,7 @@ def main() -> int:
     ap.add_argument("--depth", choices=sorted(DEPTHS), default="screen")
     ap.add_argument("--voxel", type=float, default=0.0, help="override the depth")
     ap.add_argument("--file", default=None,
-                    help="a written 3MF; the slicing stage re-derives from it")
+                    help="a written 3MF; the mesh stages read it instead of meshing")
     ap.add_argument("--json", default=None, help="write the report here")
     ap.add_argument("--list", action="store_true", help="print the stages and exit")
     args = ap.parse_args()

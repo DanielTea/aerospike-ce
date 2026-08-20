@@ -807,10 +807,28 @@ def _weld(verts: np.ndarray, faces: np.ndarray, tol: float = 1e-7):
     on it to the last bit. Without welding the surface is a triangle soup that
     reports boundary edges everywhere the slabs meet, and the topology check
     becomes meaningless.
+
+    A lexsort over three integer columns rather than `np.unique(..., axis=0)`.
+    The latter views the rows as a void dtype and sorts that, several copies
+    deep; at print resolution this runs on twelve million vertices with a
+    twenty-million-triangle mesh already in memory, and the difference is a
+    couple of gigabytes on a machine that has been killed once for wanting
+    them.
     """
+    if not len(verts):
+        return verts, faces
     key = np.round(verts / tol).astype(np.int64)
-    _, first, inverse = np.unique(key, axis=0, return_index=True, return_inverse=True)
-    out_v = verts[first]
+    order = np.lexsort((key[:, 2], key[:, 1], key[:, 0]))
+    sk = key[order]
+    starts = np.empty(len(verts), dtype=bool)
+    starts[0] = True
+    np.any(sk[1:] != sk[:-1], axis=1, out=starts[1:])
+    del sk, key
+    group = np.cumsum(starts) - 1
+    inverse = np.empty(len(verts), dtype=np.int64)
+    inverse[order] = group
+    out_v = verts[order[np.flatnonzero(starts)]]
+    del order, group, starts
     out_f = inverse[faces]
     keep = (out_f[:, 0] != out_f[:, 1]) & (out_f[:, 1] != out_f[:, 2]) & \
            (out_f[:, 2] != out_f[:, 0])
