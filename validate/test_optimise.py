@@ -204,3 +204,109 @@ def test_the_result_rebuilds_a_usable_spec(spec):
     from engine_design import design_engine
     d = design_engine(out)
     assert d.chamber.thrust_sea_level > 0.0
+
+
+# --------------------------------------------------------------------------
+# is the answer the physics, or the box?
+# --------------------------------------------------------------------------
+
+def test_bounds_report_finds_a_pinned_variable():
+    """
+    The check that matters most. A search ending hard against a limit has found
+    the edge of someone's box, not an optimum, and the number will keep moving
+    if the box is widened.
+    """
+    from optimise_ref import bounds_report
+    unit = np.full(len(DEFAULT_GENES), 0.5)
+    unit[0] = 1.0
+    unit[3] = 0.0
+    found = {b.gene: b.at for b in bounds_report(unit, DEFAULT_GENES)}
+    assert found[DEFAULT_GENES[0].path] == "upper"
+    assert found[DEFAULT_GENES[3].path] == "lower"
+
+
+def test_a_design_in_the_interior_reports_nothing():
+    from optimise_ref import bounds_report
+    assert bounds_report(np.full(len(DEFAULT_GENES), 0.5), DEFAULT_GENES) == []
+
+
+# --------------------------------------------------------------------------
+# multi-objective
+# --------------------------------------------------------------------------
+
+def _m(**kw):
+    ev = Evaluation(unit=np.zeros(3), objective=0.0, violation=0.0)
+    ev.metrics = kw
+    return ev
+
+
+def test_feasibility_outranks_dominance():
+    """
+    A feasible design dominates an infeasible one whatever the objectives say.
+    Pareto sorting without that produces a front full of melted engines.
+    """
+    from optimise_ref import dominates
+    good = _m(isp_sl=200.0, mass_kg=20.0)
+    melted = _m(isp_sl=400.0, mass_kg=1.0)
+    melted.violation = 5.0
+    assert dominates(good, melted, ["isp_sl", "mass_kg"])
+    assert not dominates(melted, good, ["isp_sl", "mass_kg"])
+
+
+def test_dominance_needs_no_worse_everywhere():
+    from optimise_ref import dominates
+    a = _m(isp_sl=300.0, mass_kg=10.0)
+    b = _m(isp_sl=280.0, mass_kg=12.0)
+    trade = _m(isp_sl=320.0, mass_kg=14.0)
+    assert dominates(a, b, ["isp_sl", "mass_kg"])
+    assert not dominates(a, trade, ["isp_sl", "mass_kg"])
+    assert not dominates(trade, a, ["isp_sl", "mass_kg"])
+
+
+def test_a_front_contains_no_dominated_member():
+    from optimise_ref import dominates, nondominated_fronts
+    pop = [_m(isp_sl=300.0, mass_kg=10.0), _m(isp_sl=280.0, mass_kg=8.0),
+           _m(isp_sl=320.0, mass_kg=14.0), _m(isp_sl=250.0, mass_kg=20.0)]
+    front = nondominated_fronts(pop, ["isp_sl", "mass_kg"])[0]
+    for p in front:
+        assert not any(dominates(q, p, ["isp_sl", "mass_kg"]) for q in pop if q is not p)
+
+
+def test_every_member_lands_in_exactly_one_front():
+    from optimise_ref import nondominated_fronts
+    pop = [_m(isp_sl=float(i), mass_kg=float(20 - i)) for i in range(6)]
+    pop += [_m(isp_sl=float(i), mass_kg=float(30 - i)) for i in range(6)]
+    fronts = nondominated_fronts(pop, ["isp_sl", "mass_kg"])
+    assert sum(len(f) for f in fronts) == len(pop)
+    seen = [id(p) for f in fronts for p in f]
+    assert len(set(seen)) == len(pop)
+
+
+def test_crowding_keeps_the_extremes():
+    """
+    The ends of a front are what define its range; dropping them collapses the
+    trade-off towards whichever corner was reached first.
+    """
+    from optimise_ref import crowding_distance
+    front = [_m(isp_sl=200.0, mass_kg=5.0), _m(isp_sl=250.0, mass_kg=10.0),
+             _m(isp_sl=300.0, mass_kg=20.0)]
+    dist = crowding_distance(front, ["isp_sl", "mass_kg"])
+    assert dist[id(front[0])] == math.inf
+    assert dist[id(front[2])] == math.inf
+    assert dist[id(front[1])] < math.inf
+
+
+def test_an_unknown_objective_is_refused(spec):
+    from optimise_ref import evolve_pareto
+    with pytest.raises(ValueError, match="unknown objective"):
+        evolve_pareto(spec, objectives=("cost_per_kilo",), generations=1,
+                      mu=2, lam=2, workers=1, verbose=False)
+
+
+def test_the_pareto_search_returns_a_real_front(spec):
+    from optimise_ref import dominates, evolve_pareto
+    front = evolve_pareto(spec, objectives=("isp_sl", "mass_kg"), mu=4, lam=4,
+                          generations=2, seed=3, workers=1, verbose=False)
+    assert front
+    for p in front:
+        assert not any(dominates(q, p, ["isp_sl", "mass_kg"]) for q in front if q is not p)

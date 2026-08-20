@@ -122,10 +122,36 @@ def test_legs_carry_the_vacuum_thrust(design, shell):
 
 def test_a_longer_leg_buckles_sooner():
     """Euler goes as one over length squared; the model must show it."""
-    short = size_legs(9000.0, -120.0, 100.0, -160.0)
-    long = size_legs(9000.0, -20.0, 100.0, -160.0)
+    short = size_legs(9000.0, -120.0, 100.0, -160.0, splay_deg=30.0)
+    long = size_legs(9000.0, -20.0, 100.0, -160.0, splay_deg=30.0)
     assert long.length_mm > short.length_mm
     assert long.buckling_load_n < short.buckling_load_n
+
+
+def test_legs_are_specified_by_where_the_feet_land():
+    """
+    Footprint is what a mount is actually specified by. A splay angle is a local
+    property that says nothing about it: 35 degrees over a 158 mm drop puts the
+    feet at r 211 mm and doubles the engine's footprint.
+    """
+    leg = size_legs(9000.0, -60.0, 100.0, -160.0, foot_radius_mm=140.0)
+    assert leg.r_foot_mm == pytest.approx(140.0)
+    assert leg.self_supporting
+
+
+def test_feet_that_cannot_be_reached_are_refused():
+    """Reaching too far outboard over too short a drop is an overhang, not a leg."""
+    with pytest.raises(ValueError, match="splay"):
+        size_legs(9000.0, -150.0, 100.0, -160.0, foot_radius_mm=250.0)
+
+
+def test_the_footprint_stays_sane(shell, design):
+    """
+    Feet far outboard of the flange are a mount nobody can bolt to a stand. The
+    render is what caught this: legs reaching r 211 mm against a 123 mm flange.
+    """
+    _, _, leg = shell
+    assert leg.r_foot_mm < 1.6 * design.assembly.flange_radius
 
 
 def test_fewer_than_three_legs_is_refused():

@@ -162,7 +162,8 @@ def size_legs(
     x_foot_mm: float,
     count: int = 4,
     safety: float = 2.0,
-    splay_deg: float = 35.0,
+    foot_radius_mm: float | None = None,
+    splay_deg: float | None = None,
     width_deg: float = 14.0,
     material_e_pa: float = 190e9,
     bearing_allowable_pa: float = 300e6,
@@ -177,13 +178,31 @@ def size_legs(
     """
     if count < 3:
         raise ValueError("fewer than three legs cannot constrain the engine")
-    if splay_deg > 45.0:
-        raise ValueError(
-            f"{splay_deg:.0f} degree splay leans further than the process holds; "
-            f"the leg overhangs along its whole length")
 
     drop = abs(x_foot_mm - x_top_mm)
-    r_foot = r_top_mm + drop * math.tan(math.radians(splay_deg))
+
+    # Parameterise by where the feet land, not by how far the leg leans. A splay
+    # angle is a local property and says nothing about footprint: 35 degrees
+    # over a 158 mm drop puts the feet at r 211 mm, doubling the engine's
+    # footprint and hanging them in space well outboard of the flange. What a
+    # mount is actually specified by is its bolt circle.
+    if foot_radius_mm is not None:
+        r_foot = foot_radius_mm
+        splay = math.degrees(math.atan2(r_foot - r_top_mm, drop))
+        if splay > 45.0:
+            raise ValueError(
+                f"reaching r {r_foot:.0f} mm over a {drop:.0f} mm drop needs "
+                f"{splay:.0f} degrees of splay, past what the process holds. "
+                f"Start the leg further forward or bring the feet in.")
+        if splay < 0.0:
+            raise ValueError("the feet are inboard of where the legs start")
+    else:
+        splay = 35.0 if splay_deg is None else splay_deg
+        if splay > 45.0:
+            raise ValueError(
+                f"{splay:.0f} degree splay leans further than the process holds; "
+                f"the leg overhangs along its whole length")
+        r_foot = r_top_mm + drop * math.tan(math.radians(splay))
     load = thrust_n * safety / count
     length = math.hypot(drop, r_foot - r_top_mm)
 
@@ -263,12 +282,15 @@ def shell_features(design, rib_flank_deg: float = 55.0, leg_count: int = 4,
             flank_deg=ring.flank_deg, x_start=ring.x_start, x_end=ring.x_end,
             outward=outward, phase=ring.phase))
 
+    # Feet a little outboard of the flange -- enough to take an overturning
+    # moment, not so far that the engine needs its own postcode.
     leg = size_legs(
         design.chamber.thrust_vacuum,
-        x_top_mm=a.converging_start_x,
+        x_top_mm=0.5 * (a.head_x + a.converging_start_x),
         r_top_mm=float(max(a.cowl_outer_r)),
         x_foot_mm=a.head_x - a.structure.head_thickness_mm,
-        count=leg_count, splay_deg=splay_deg)
+        count=leg_count,
+        foot_radius_mm=1.18 * a.flange_radius)
     out["cowl"]["legs"].append(LegAdd(
         count=leg.count, x_top=leg.x_top_mm, r_top=leg.r_top_mm,
         x_foot=leg.x_foot_mm, r_foot=leg.r_foot_mm,
