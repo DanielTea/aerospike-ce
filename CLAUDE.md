@@ -241,6 +241,24 @@ The general lesson: **a fix that works at one grid alignment is not a fix.**
 Sweep the lattice offset, the same way geometry gets swept over the parameter
 range.
 
+## The gate has a memory budget too, and it is easy to spend
+
+Checking a mesh costs more than holding it. The cowl's print mesh is 900 MB;
+one pass of the gate over it wanted 13.7 GB and the kernel killed the build
+halfway through. None of that was the geometry -- it was numpy being asked for
+the obvious thing four times over. `np.unique(edges, axis=0)` views seventy-two
+million rows as a void dtype and sorts that, several copies deep, when the two
+indices fit in one int64 and it could be an in-place 1-D sort. `v[f[:, 0]]`
+gathers 1.7 GB of corners before any arithmetic happens, and four separate
+routines wanted to do it.
+
+So: pack indices into integers instead of sorting rows, count with `bincount`
+instead of `unique`, do per-face vector maths a couple of million faces at a
+time, and measure the peak on a mesh the size of the real one before running
+anything that takes an hour. `resource.getrusage(...).ru_maxrss` and a
+synthetic torus of the right size will tell you in ninety seconds what a print
+build tells you in forty minutes.
+
 ## Voxel resolution
 
 `geometry.voxel_size_mm` controls memory cubically. Halving it multiplies memory
