@@ -189,6 +189,12 @@ It is a geometry and arithmetic gate, and it inherits every limit in
 - The slicing stage proves a slicer will accept the file. It does not prove the
   machine will build the part: no self-intersection test, no build-volume
   check against a named machine, no support or thermal simulation.
+- Only the 3MF path is snapped to its own write grid. `export_cooled.py` and
+  `mesh_export.export_assembly` write binary STL, whose float32 coordinates
+  quantise to about 1.5e-5 mm out at the cowl's radius. That is ten times finer
+  than the level guard's separation, so the failure the 3MF had is ten times
+  less likely there rather than impossible, and nothing checks for it. Those
+  files are inspection aids; the 3MF is the deliverable.
 - A green pipeline means every gate that exists passed. The failures listed at
   the top of this page were all, at the time they shipped, outside every gate
   that existed.
