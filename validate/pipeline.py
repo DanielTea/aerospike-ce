@@ -62,7 +62,7 @@ from build_plan import build_plan, narrowest_feature
 from engine_design import design_engine
 from mesh_export import (manifold_report, mesh_area, mesh_volume, read_3mf,
                          slicing_report)
-from mesh_solid import build_mesh_streaming
+from mesh_solid import build_mesh_streaming, field_deviation, part_sampler
 from printability_ref import choose_build_direction
 from print_ready import features_for, surfaces
 
@@ -482,6 +482,34 @@ def stage_watertight(design, parts, fields, voxel_mm, narrow, resolved: bool,
                    f"{abs(offset) / voxel_mm:.3f} of a voxel")
         else:
             st.add(f"{name} volume", got > 0.0, f"{got / 1000:.1f} cm3", skipped=True)
+
+        # Volume is a single number over a whole part, and a mesh can hold it
+        # exactly while the shape drifts: decimation moves triangles onto the
+        # chords of the curves they spanned, taking as much off one side as it
+        # adds to the other. So ask the distance directly, at the vertices and
+        # across the faces, against the same field the volume came from.
+        #
+        # Unlike the resolution check this one *can* be asked of a written
+        # file, and it is the question that matters about one: not what voxel
+        # it claims, but how far from the engine it actually is.
+        dev = field_deviation(v, f, part_sampler(design.assembly.profiles[name],
+                                                 **features_for(design, name)))
+        # Two bounds, because they catch different things. Marching cubes
+        # cannot put a vertex inside a sharp concave corner, so the worst point
+        # on any faithful mesh is about a voxel out and the maximum is nearly
+        # useless as a gate -- it reads 195 um on the undecimated cowl and 195
+        # um again after a ten-fold decimation. The mean is what moves: 12 um
+        # undecimated, 18 um at the floor. So the maximum is bounded by the
+        # resolution the features demand, and the mean by a twentieth of the
+        # thinnest feature, which is the one that would notice a part quietly
+        # going faceted.
+        st.add(f"{name} follows the field", dev["max_mm"] <= narrow / 3.0,
+               f"worst point {dev['max_mm'] * 1000:.0f} um from the field, "
+               f"against {narrow / 3.0 * 1000:.0f} um "
+               f"(a voxel at the resolution {narrow:.2f} mm demands)")
+        st.add(f"{name} keeps its shape", dev["rms_mm"] <= narrow / 20.0,
+               f"{dev['rms_mm'] * 1000:.1f} um rms over {dev['points'] / 1000:.0f}k "
+               f"sampled points, against {narrow / 20.0 * 1000:.0f} um")
     return st
 
 

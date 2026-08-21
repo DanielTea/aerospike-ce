@@ -490,6 +490,190 @@ def _wedge_sdf(Y, Z, theta0: float, theta1: float) -> np.ndarray:
     return np.maximum((theta0 - th) * r, (th - theta1) * r).astype(np.float32)
 
 
+def sample_field(
+    X, Y, Z,
+    profile: Profile,
+    base: np.ndarray | None = None,
+    R: np.ndarray | None = None,
+    TH: np.ndarray | None = None,
+    channels: list[ChannelCut] | None = None,
+    holes: list[HoleCut] | None = None,
+    ports: list[PortCut] | None = None,
+    bosses: list[RingBoss] | None = None,
+    lugs: list[LugAdd] | None = None,
+    plenums: list[PlenumCut] | None = None,
+    ribs: list[RibAdd] | None = None,
+    legs: list[LegAdd] | None = None,
+    cut_sector: tuple[float, float] | None = None,
+):
+    """
+    The part's signed distance at whatever points are handed in.
+
+    A grid plane or a scatter of mesh vertices -- the arrays only have to
+    broadcast together. Pulling it out of the grid loop is what lets a mesh be
+    asked how far it strays from the surface it claims to be, which is a
+    question about points that are nowhere near a lattice.
+
+    The order is load-bearing and is the reason this is one function rather
+    than an idiom copied per caller: material is added before anything is taken
+    away, so a hole drilled through a lug cuts the metal that was just put
+    there rather than the air where it used to be.
+
+    `base` is the part's own distance where the caller already has it by a
+    cheaper route, and `R`/`TH` likewise. The polygon distance and the
+    cylindrical coordinates are most of the cost on a grid, and the streaming
+    mesher computes both once per plane.
+    """
+    if R is None:
+        R = np.hypot(Y, Z)
+    if TH is None:
+        TH = np.arctan2(Z, Y)
+    if base is None:
+        # Match the caller's precision rather than imposing one: this is
+        # evaluated on a float32 grid by build_field and on float64 points by
+        # part_sampler, and quietly widening the grid path would change every
+        # vertex the mesher places.
+        vx = np.asarray(profile.x, dtype=X.dtype)
+        vr = np.asarray(profile.r, dtype=X.dtype)
+        d = _polygon_sdf(X, R, vx, vr)
+    else:
+        d = base
+
+    for b in (bosses or []):
+        d = np.minimum(d, _ring_boss_sdf(X, R, b))
+    for rb in (ribs or []):
+        d = np.minimum(d, _rib_sdf(X, R, TH, rb))
+    for lgg in (legs or []):
+        d = np.minimum(d, _leg_sdf(X, R, TH, lgg))
+    for lg in (lugs or []):
+        d = np.minimum(d, _lug_sdf(X, R, TH, lg))
+    for pl in (plenums or []):
+        d = np.maximum(d, -_plenum_sdf(X, R, pl))
+    for c in (channels or []):
+        d = np.maximum(d, -_channel_sdf(X, R, TH, c))
+    for h in (holes or []):
+        d = np.maximum(d, -_hole_sdf(X, Y, Z, h))
+    for pt in (ports or []):
+        d = np.maximum(d, -_port_sdf(X, R, TH, pt))
+    if cut_sector is not None:
+        d = np.maximum(d, -_wedge_sdf(Y, Z, cut_sector[0], cut_sector[1]))
+    return d
+
+
+def part_sampler(profile: Profile, **features):
+    """
+    A callable giving one part's signed distance at arbitrary points.
+
+    Takes the same feature keywords the mesher takes, so a caller that meshed a
+    part can ask about the field it meshed by passing the same dict through.
+    """
+    features = {k: v for k, v in features.items()
+                if k in ("channels", "holes", "ports", "bosses", "lugs",
+                         "plenums", "ribs", "legs", "cut_sector")}
+
+    def sample(points: np.ndarray) -> np.ndarray:
+        p = np.asarray(points, dtype=np.float64)
+        return sample_field(p[:, 0], p[:, 1], p[:, 2], profile, **features)
+
+    return sample
+
+
+def _face_areas(verts: np.ndarray, faces: np.ndarray,
+                chunk: int = 2_000_000) -> np.ndarray:
+    """Triangle areas, a couple of million faces at a time."""
+    out = np.empty(len(faces), dtype=np.float64)
+    for i in range(0, len(faces), chunk):
+        blk = faces[i:i + chunk]
+        a, b, c = verts[blk[:, 0]], verts[blk[:, 1]], verts[blk[:, 2]]
+        out[i:i + chunk] = 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)
+    return out
+
+
+def field_deviation(verts: np.ndarray, faces: np.ndarray, sample,
+                    level: float = SURFACE_BIAS_MM,
+                    budget: int = 1_200_000,
+                    chunk: int = 200_000) -> dict:
+    """
+    How far a mesh strays from the surface the field says it is.
+
+    Corners *and* centres. Decimation moves the middle of a triangle much
+    further than its corners -- a collapse leaves the surviving vertices on the
+    surface and the flat triangle between them cutting across whatever curve
+    they spanned -- so reading only the corners reports nothing wrong with a
+    mesh that has visibly lost the shape. About four vertices in ten do survive
+    a collapse unmoved, which is exactly why the corners alone prove nothing.
+
+    Sampled, not exhaustive, and aimed rather than uniform. Evaluating the
+    field costs one pass over the profile per point and these profiles carry
+    seventeen hundred segments, so asking every vertex and every centroid of a
+    24-million-triangle part takes a quarter of an hour. What is asked instead
+    is a fixed budget, half of it a systematic stride over the whole mesh --
+    drift shows up wherever it is -- and half of it spent on the largest
+    triangles, corners and centre each, because chordal error grows with the
+    triangle and making some triangles big is the entire job of decimation. A
+    defect that hides from both is smaller than the mesh around it.
+
+    Unsigned, in millimetres, measured against the level the mesher actually
+    took rather than against zero: the surface is the `SURFACE_BIAS_MM`
+    contour, so a vertex exactly on it reads the bias and not nothing.
+
+    One honest limitation. The field is composed with min and max, and the
+    maximum of two distance functions is not a distance function -- outside a
+    concave seam it reads short. This is therefore a lower bound on how far the
+    mesh moved: tight over the smooth ground decimation actually changes,
+    optimistic in the corners. It is a measurement, not a guarantee.
+    """
+    v = np.asarray(verts, dtype=np.float64)
+    f = np.asarray(faces)
+    half = max(1, budget // 2)
+
+    # Half the budget, spread evenly: a stride rather than a random draw, so
+    # the same mesh always gets the same answer and two runs are comparable.
+    sv = max(1, (2 * len(v)) // half)
+    sf = max(1, (2 * len(f)) // half)
+    picked_v = [v[::sv]]
+    picked_f = [f[::sf]]
+
+    # The other half where the error concentrates. argpartition, not a sort:
+    # the order among the big ones does not matter, only that they are the big
+    # ones, and sorting 24 million areas to use the last few thousand is a
+    # minute of nothing.
+    want = max(1, half // 4)
+    if len(f) > want:
+        areas = _face_areas(v, f)
+        big = np.argpartition(areas, len(areas) - want)[-want:]
+        picked_f.append(f[big])
+    else:
+        picked_f.append(f)
+
+    worst, total_sq, n = 0.0, 0.0, 0
+
+    def take(points: np.ndarray) -> None:
+        nonlocal worst, total_sq, n
+        for i in range(0, len(points), chunk):
+            d = np.abs(sample(points[i:i + chunk]) - level)
+            if d.size:
+                worst = max(worst, float(d.max()))
+                total_sq += float(np.dot(d, d))
+                n += d.size
+
+    for block in picked_v:
+        take(block)
+    for block in picked_f:
+        if not len(block):
+            continue
+        a, b, c = v[block[:, 0]], v[block[:, 1]], v[block[:, 2]]
+        take((a + b + c) / 3.0)
+        take(a)
+
+    return {
+        "max_mm": worst,
+        "rms_mm": math.sqrt(total_sq / max(n, 1)),
+        "points": n,
+        "of_points": 2 * len(v) + 4 * len(f),
+    }
+
+
 def build_field(
     profile: Profile,
     voxel_mm: float = 0.2,
@@ -525,8 +709,16 @@ def build_field(
     nx = max(2, int(math.ceil((x1 - x0) / voxel_mm)) + 1)
     ny = max(2, int(math.ceil(2.0 * r_max / voxel_mm)) + 1)
 
-    xs = np.linspace(x0, x1, nx, dtype=np.float32)
-    ys = np.linspace(-r_max, r_max, ny, dtype=np.float32)
+    # Stepped by the voxel, not fitted to the extent. linspace divides the
+    # span into nx - 1 equal parts, and nx came from a ceil, so its step is
+    # slightly under the voxel -- while this function returns the voxel, and
+    # mesh_field then meshes with it. The result was a solid stretched by up to
+    # one part in nx along each axis, which nothing caught because the
+    # streaming mesher that writes print files has always stepped by arange and
+    # only this path did not. The grid now runs a fraction past the extent
+    # instead, which is margin either way.
+    xs = (x0 + np.arange(nx) * voxel_mm).astype(np.float32)
+    ys = (-r_max + np.arange(ny) * voxel_mm).astype(np.float32)
     Y, Z = np.meshgrid(ys, ys, indexing="ij")
     R = np.sqrt(Y * Y + Z * Z).astype(np.float32)
     TH = np.arctan2(Z, Y).astype(np.float32)
@@ -537,26 +729,11 @@ def build_field(
 
     for i, xv in enumerate(xs):
         X = np.full(R.shape, xv, dtype=np.float32)
-        d = _polygon_sdf(X, R, vx, vr)
-        for b in bosses:
-            d = np.minimum(d, _ring_boss_sdf(X, R, b))
-        for rb in ribs:
-            d = np.minimum(d, _rib_sdf(X, R, TH, rb))
-        for lgg in legs:
-            d = np.minimum(d, _leg_sdf(X, R, TH, lgg))
-        for lg in lugs:
-            d = np.minimum(d, _lug_sdf(X, R, TH, lg))
-        for pl in plenums:
-            d = np.maximum(d, -_plenum_sdf(X, R, pl))
-        for c in channels:
-            d = np.maximum(d, -_channel_sdf(X, R, TH, c))
-        for h in holes:
-            d = np.maximum(d, -_hole_sdf(X, Y, Z, h))
-        for pt in ports:
-            d = np.maximum(d, -_port_sdf(X, R, TH, pt))
-        if cut_sector is not None:
-            d = np.maximum(d, -_wedge_sdf(Y, Z, cut_sector[0], cut_sector[1]))
-        field[i] = d
+        field[i] = sample_field(
+            X, Y, Z, profile, R=R, TH=TH,
+            channels=channels, holes=holes, ports=ports, bosses=bosses,
+            lugs=lugs, plenums=plenums, ribs=ribs, legs=legs,
+            cut_sector=cut_sector)
 
     return field, (x0, -r_max, -r_max), voxel_mm
 
@@ -1006,7 +1183,24 @@ def build_mesh_streaming(
                  tol=voxel_mm * 1e-5)
 
 
-def decimate(verts: np.ndarray, faces: np.ndarray, keep_fraction: float = 0.10):
+# How eagerly the collapser is allowed to take an expensive edge.
+#
+# The library grows its error threshold as (iteration + 3) ** agg, so a larger
+# number reaches the target faster by accepting worse collapses near the end.
+# At the default 7 the centrebody pinches: keep 0.40 comes back with two edges
+# in four triangles, two duplicated faces and a handle missing, out of six and
+# a half million -- and the volume unchanged to three decimals, so nothing was
+# lost, the surface was folded. The gate refused it, correctly, and the part
+# then shipped every one of its 8.2 million triangles.
+#
+# At 3 the same rung is clean, and so is 0.15: 2.5 million triangles, same
+# genus, same volume. The collapses that broke the surface were never needed;
+# they were the collapser hurrying.
+COLLAPSE_AGGRESSIVENESS = 3.0
+
+
+def decimate(verts: np.ndarray, faces: np.ndarray, keep_fraction: float = 0.10,
+             agg: float = COLLAPSE_AGGRESSIVENESS):
     """
     Quadric decimation to a target fraction of the triangles *kept*.
 
@@ -1022,12 +1216,16 @@ def decimate(verts: np.ndarray, faces: np.ndarray, keep_fraction: float = 0.10):
     Decimation can merge across a thin feature and change the genus, which here
     would mean silently closing a cooling channel. The caller compares the genus
     before and after; this function only does the collapsing.
+
+    `agg` is how hard it is allowed to try -- see COLLAPSE_AGGRESSIVENESS. It
+    is the difference between a part that decimates six-fold and one that
+    refuses to decimate at all, and it costs nothing either way.
     """
     import fast_simplification
 
     v, f = fast_simplification.simplify(
         verts.astype(np.float32), faces.astype(np.int32),
-        1.0 - float(np.clip(keep_fraction, 1e-3, 1.0)))
+        1.0 - float(np.clip(keep_fraction, 1e-3, 1.0)), agg=agg)
     return np.asarray(v, dtype=float), np.asarray(f, dtype=np.int64)
 
 

@@ -101,7 +101,7 @@ the two is the failure mode this structure exists to prevent.
 | `validate/interfaces_ref.py` | ports, bosses, the head joint | what to connect where |
 | `validate/printability_ref.py` | overhangs, bridges, drainage | decides the build direction |
 | `validate/optimise_ref.py` | evolutionary search over the spec | seeded, so it is testable |
-| `validate/mesh_solid.py` | SDF + marching cubes | for anything not axisymmetric |
+| `validate/mesh_solid.py` | SDF + marching cubes, and how far a mesh strays from it | for anything not axisymmetric |
 | `validate/mesh_export.py` | revolve to STL, cutaway PNG | exact, axisymmetric only |
 | `validate/test_*.py` | invariants | add a test before adding physics |
 | `validate/pipeline.py` | the gate: physics, geometry, watertight, slicing | every test belongs to a stage |
@@ -109,7 +109,7 @@ the two is the failure mode this structure exists to prevent.
 | `validate/plot_engine.py` | assembly PNG + area schedule | your eyes on the engine |
 | `validate/plot_cooled.py` | section views through the field | your eyes on the channels |
 | `validate/export_cooled.py` | cooled STLs + topology check | |
-| `validate/print_ready.py` | the checked print file | refuses rather than writes |
+| `validate/print_ready.py` | the checked print files, full and compact | refuses rather than writes |
 | `validate/verify_print_file.py` | reopens a written 3MF and re-derives everything | checks the writer, not the mesher |
 | `validate/build_plan.py` | writes the plan C# reads | the seam; shapes only |
 | `model/BuildPlan.cs` | reads the plan | refuses a version it does not know |
@@ -186,6 +186,75 @@ resolve. `export_cooled.py` derives the voxel size from the narrowest feature,
 checks the Euler characteristic against what the features imply, and only
 decimates as far as the topology survives -- pushed further, quadric collapse
 closes a cooling channel and leaves a mesh that still looks perfectly fine.
+
+## A decimator in a hurry breaks the surface, and the gate blames the geometry
+
+`fast_simplification` grows its error threshold as `(iteration + 3) ** agg`, so
+a larger `agg` reaches the requested reduction by taking worse collapses near
+the end. At the default 7 the centrebody comes back from keep 0.40 with two
+edges in four triangles, two duplicated faces and a handle missing -- out of six
+and a half million -- and its volume unchanged to three decimals. Nothing was
+lost; the surface was folded. The ladder refused it, correctly, and the part
+then shipped every one of its 8.2 million triangles.
+
+At `agg = 3` the same rung is clean and so is keep 0.15, and the floor is 1.73
+million triangles at the same genus and the same volume. The collapses that
+broke the surface were never needed. `COLLAPSE_AGGRESSIVENESS` is 3 for that
+reason, and higher values fail in a characteristic way worth recognising: agg 4
+loses one handle, agg 5 loses 68, agg 6 and 7 turn the part into a hundred
+pieces and add five percent to its volume.
+
+The ladder now opens at the target rung and falls *back up* on failure, rather
+than climbing from 0.85 every time. Both orders end in the same place; the
+difference is eleven probes against one, and a probe on a 24-million-triangle
+part is two minutes. The old order existed because the ladder used to stop at
+the first failure -- which was the right response to a decimator that failed
+early and often, and the wrong one once it stopped doing that.
+
+## Topology is necessary and it is not sufficient
+
+Watertight, one solid, no sealed void, right genus, volume to three decimals --
+a mesh can hold every one of those while its shape drifts. Decimation moves
+triangles onto the chords of the curves they spanned, and that takes as much off
+one side as it adds to the other, so the volume never notices and the genus
+cannot. Only distance notices.
+
+`field_deviation` asks it: the signed field, sampled at the mesh's vertices and
+across its faces, against the level the mesher actually took. Two numbers come
+back and they are read differently.
+
+- The **maximum** is about a voxel on any faithful mesh and stays there. Marching
+  cubes cannot put a vertex inside a sharp concave corner, so the undecimated
+  cowl reads 195 µm and reads 195 µm again after a ten-fold decimation. It
+  bounds the meshing, not the decimation.
+- The **mean** is what moves: 12 µm undecimated, 13 µm at keep 0.30, 18 µm at
+  the floor. That is the number that would notice a part going quietly faceted.
+
+Both are lower bounds, and the reason matters: the field is composed with `min`
+and `max`, and the maximum of two distance functions is not a distance function
+-- outside a concave seam it reads short. Tight over the smooth ground
+decimation actually changes, optimistic in the corners. A measurement, not a
+guarantee.
+
+Sampling is budgeted and aimed. Evaluating the field costs one pass over the
+profile per point and these profiles carry seventeen hundred segments, so asking
+every vertex and centroid of the cowl takes a quarter of an hour. Half the
+budget is a stride over the whole mesh and half goes to the largest triangles,
+because chordal error grows with the triangle and making some triangles big is
+the entire job of decimation.
+
+## The print file is written twice
+
+`full` and `compact`, from one meshing, differing only in that budget: 3 µm of
+added rms drift for the reference and 12 µm for the compact one. Twelve microns
+is a third of a layer and a fiftieth of the thinnest wall, so the compact file
+is the same part to a printer and not to a measuring machine.
+
+A coarser *voxel* is not the way to a smaller file and never will be. The 0.233
+mm voxel is set by the 0.70 mm hot wall; below it the channels shred into
+fragments, the watertight stage reports several hundred sealed voids, and what
+comes out is not a cheaper engine but a broken one. Triangles come off by
+collapse, and every collapse is checked.
 
 ## A print file is a claim, and it gets checked
 

@@ -63,8 +63,34 @@ from mesh_solid import (
     cowl_channels,
     decimate,
     feed_ports,
+    field_deviation,
+    part_sampler,
 )
 from shell_ref import shell_features
+
+
+# How many points the ladder spends asking each rung how far it has moved.
+# Small on purpose: this runs at every rung of every part of every tier, and
+# the mesh that is actually written is measured again properly afterwards.
+LADDER_SAMPLE = 150_000
+
+# The two files this writes, and the only thing that differs between them.
+#
+# Both are meshed from the same field at the same voxel, both go through the
+# same gates, and both are refused on the same terms. What separates them is
+# how much shape error decimation is allowed to add, in rms distance from the
+# surface the field defines:
+#
+#   full     3 um -- decimate only where it is nearly free. The reference.
+#   compact 12 um -- decimate until the ladder or the budget stops it.
+#
+# Twelve microns is a third of a layer at 30 um and a fiftieth of the thinnest
+# wall in the engine, so the compact file is the same part to a printer. It is
+# not the same part to a measuring machine, which is why both exist.
+TIERS = {
+    "full":    dict(keep=0.30, budget_mm=0.003, suffix=""),
+    "compact": dict(keep=0.02, budget_mm=0.012, suffix="-compact"),
+}
 
 
 def surfaces(verts: np.ndarray, faces: np.ndarray):
@@ -173,14 +199,30 @@ def check(verts, faces, label: str, deep: bool = False) -> dict:
     return rep
 
 
-def reduce_safely(verts, faces, target_ratio: float, tol_volume: float = 0.02):
+def reduce_safely(verts, faces, target_ratio: float, tol_volume: float = 0.02,
+                  sample=None, budget_mm: float | None = None):
     """
-    Decimate as far as topology and volume survive, and no further.
+    Decimate as far as topology, volume and shape survive, and no further.
 
     Returns the last mesh that passed. Asking for a ratio and taking whatever
     comes back is how a cooling channel gets quietly closed: the result is still
     watertight, still looks like an engine, and no longer has the feature the
     part exists for.
+
+    Topology is necessary and not sufficient. A mesh can keep every handle,
+    every component and its volume to three decimals while the nozzle contour
+    goes visibly faceted, because none of those quantities can see a flat
+    triangle cutting the corner off a curve. So when a field sampler is given,
+    each rung is also asked how far it has moved from the surface the field
+    defines, and the ladder stops when that exceeds `budget_mm` more than the
+    undecimated mesh already did.
+
+    The comparison is against the undecimated mesh rather than against zero
+    because marching cubes has its own error and it is not small: sharp
+    concave corners get rounded by up to a voxel, so the mesh this starts from
+    is already 195 um from the field at its worst and 12 um in the mean. What
+    is being bounded here is what *decimation* added, which is the only part of
+    it this function controls.
     """
     def repair(v, f):
         """
@@ -200,52 +242,69 @@ def reduce_safely(verts, faces, target_ratio: float, tol_volume: float = 0.02):
         return v2, f2[area > 0.0]
 
     base = check(verts, faces, "base")
-    best = (verts, faces, base)
-    # Mildest first, stopping at the target. Walking the other way -- skipping
-    # every ratio gentler than the target and opening with the target itself --
-    # means a part that cannot survive an eight-fold collapse gets no
+    base_dev = (field_deviation(verts, faces, sample, budget=LADDER_SAMPLE)
+                if sample is not None and budget_mm is not None else None)
+    if base_dev is not None:
+        base["deviation_rms_mm"] = base_dev["rms_mm"]
+
+    # Hardest first, and take the first rung that survives.
+    #
+    # This used to walk the other way, mildest first, keeping the last rung
+    # that passed -- because opening with the target and *giving up* when it
+    # failed meant a part that could not survive an eight-fold collapse got no
     # decimation at all, when it would have taken a halving without complaint.
-    # Finely stepped near the top, because that is where the channelled
-    # parts stop. The centrebody survives 0.50 and not 0.30; with only
-    # those two rungs the 0.40 that it would also have taken is never
-    # tried, and a fifth of the file is carried for nothing.
-    # Starts at 0.85, not 0.5. The head and the cowl both carry 1.2 mm
-    # passages now, and halving the triangle count closes them -- so with
-    # 0.5 as the mildest rung the guard correctly refused, and both parts
-    # shipped every one of their triangles. A ladder is only as good as
-    # its gentlest step.
-    for ratio in (0.85, 0.7, 0.6, 0.5, 0.4, 0.35, 0.3, 0.25,
-                  0.2, 0.15, 0.12, 0.08, 0.05):
-        if ratio < target_ratio:
-            continue
+    # That reasoning was right about the failure and wrong about the order: the
+    # cure is to fall back up the ladder, not to climb it every time. Walking
+    # up from 0.85 costs a probe per rung, and a probe on a 24-million-triangle
+    # part is a minute of collapsing and a minute of checking. Starting at the
+    # target costs one probe in the case that actually happens.
+    #
+    # Finely stepped near the top because that is where the channelled parts
+    # stop, and reaching 0.85 as the gentlest rung matters: the head and the
+    # cowl both carry 1.2 mm passages, and a ladder is only as good as its
+    # gentlest step.
+    rungs = [r for r in (0.85, 0.7, 0.6, 0.5, 0.4, 0.35, 0.3, 0.25,
+                         0.2, 0.15, 0.12, 0.08, 0.05, 0.03, 0.02)
+             if r >= target_ratio]
+    if not rungs:
+        rungs = [target_ratio]
+
+    for ratio in reversed(rungs):
         v2, f2 = repair(*decimate(verts, faces, ratio))
         rep = check(v2, f2, f"keep {ratio:.2f}")
         if not rep["watertight"] or rep["surfaces"] != base["surfaces"]:
-            break
+            continue
         # A quadric collapse can slide three vertices into a line without
         # breaking a single edge pairing, so this has to be asked separately.
         # The field carries no zero-area triangles once it is meshed off the
         # bias; the decimator puts them back, and every other check here says
         # the result is fine. export_cooled applies the same criterion.
-        # After the repair this should be zero; if it is not, the collapse did
-        # something a weld cannot undo and the step is not safe to take.
         if rep["degenerate_faces"] > base["degenerate_faces"]:
-            break
+            continue
         # A collapse can also duplicate a face onto its neighbour or flip one
         # against it. Both keep every edge in two triangles, so the watertight
         # test above passes them, and both are a surface a slicer reads the
         # wrong way round. The fan count is left to the deep check on the
         # finished part: a new pinch moves the genus, which is the next line.
         if rep["duplicate_faces"] > base["duplicate_faces"]:
-            break
+            continue
         if rep["inconsistent_edges"] > base["inconsistent_edges"]:
-            break
+            continue
         if rep["genus"] != base["genus"]:
-            break
+            continue
         if abs(rep["volume_mm3"] - base["volume_mm3"]) > tol_volume * abs(base["volume_mm3"]):
-            break
-        best = (v2, f2, rep)
-    return best
+            continue
+        if base_dev is not None:
+            # Cheap here on purpose: a small sample per rung, and the mesh that
+            # is actually written is measured properly once by the caller.
+            dev = field_deviation(v2, f2, sample, budget=LADDER_SAMPLE)
+            if dev["rms_mm"] - base_dev["rms_mm"] > budget_mm:
+                continue
+            rep["deviation_rms_mm"] = dev["rms_mm"]
+        return (v2, f2, rep)
+
+    # Nothing survived: ship what came in rather than something broken.
+    return (verts, faces, base)
 
 
 def features_for(design, part):
@@ -272,49 +331,13 @@ def features_for(design, part):
                 legs=shell.get(part, {}).get("legs"))
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--spec", default="../spec/regen.json")
-    ap.add_argument("--out", default="../docs/print")
-    ap.add_argument("--voxel", type=float, default=0.0,
-                    help="override; default is the narrowest feature over three")
-    ap.add_argument("--keep", type=float, default=0.12,
-                    help="decimation target; the run stops earlier if topology moves")
-    args = ap.parse_args()
+def refusals(reports) -> list[str]:
+    """
+    Every reason this engine must not be written, in plain words.
 
-    with open(args.spec, encoding="utf-8") as fh:
-        spec = json.load(fh)
-    design = design_engine(spec)
-    plan = build_plan(spec, design)
-    narrow = narrowest_feature(plan)
-    voxel = args.voxel if args.voxel > 0 else round(narrow / 3.0, 3)
-
-    os.makedirs(args.out, exist_ok=True)
-    print(f"{spec.get('name')}: narrowest feature {narrow:.2f} mm -> "
-          f"meshing at {voxel:.3f} mm")
-
-    parts, reports = {}, []
-    for part in design.assembly.profiles:
-        t0 = time.time()
-        v, f = build_mesh_streaming(design.assembly.profiles[part], voxel_mm=voxel,
-                                    **features_for(design, part))
-        raw = len(f)
-        v, f, rep = reduce_safely(v, f, args.keep)
-        # Onto the write grid first, so the mesh that is checked below is the
-        # mesh that reaches the file, down to the last decimal.
-        v, f = snap_to_the_written_grid(v, f)
-        # The ladder runs on the cheap checks; the part that actually gets
-        # written is asked the expensive question once, here.
-        rep = check(v, f, rep["label"], deep=True)
-        parts[part] = (v, f)
-        reports.append((part, raw, rep, time.time() - t0))
-        print(f"  {part:11s} {time.time() - t0:6.0f}s  {raw:9d} -> {len(f):8d} tris  "
-              f"{rep['label']:10s} watertight {str(rep['watertight']):5s} "
-              f"genus {rep['genus']:5d}  sealed {len(rep['sealed'])}  "
-              f"loose {len(rep['loose'])}  flat {rep['degenerate_faces']}  "
-              f"pinch {rep['nonmanifold_vertices']}  "
-              f"{rep['volume_mm3'] / 1000:8.2f} cm3", flush=True)
-
+    One list per tier, because a tier is a file and a file is either fit to
+    hand someone or it is not.
+    """
     bad = []
     for part, _, r, _ in reports:
         if not r["watertight"]:
@@ -358,15 +381,107 @@ def main() -> None:
         if not r["finite"] or not r["indices_in_range"]:
             bad.append(f"{part} has non-finite coordinates or a triangle "
                        f"referencing a vertex that is not there")
+    return bad
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--spec", default="../spec/regen.json")
+    ap.add_argument("--out", default="../docs/print")
+    ap.add_argument("--voxel", type=float, default=0.0,
+                    help="override; default is the narrowest feature over three")
+    ap.add_argument("--keep", type=float, default=0.0,
+                    help="override every tier's decimation target")
+    ap.add_argument("--tier", default=",".join(TIERS),
+                    help=f"which files to write: {', '.join(TIERS)}")
+    args = ap.parse_args()
+
+    tiers = [t.strip() for t in args.tier.split(",") if t.strip()]
+    unknown = [t for t in tiers if t not in TIERS]
+    if unknown:
+        raise SystemExit(f"unknown tier(s): {', '.join(unknown)}; "
+                         f"pick from {', '.join(TIERS)}")
+    if not tiers:
+        raise SystemExit(f"--tier selected nothing; pick from {', '.join(TIERS)}")
+    if args.keep > 0.0:
+        for t in tiers:
+            TIERS[t] = dict(TIERS[t], keep=args.keep)
+
+    with open(args.spec, encoding="utf-8") as fh:
+        spec = json.load(fh)
+    design = design_engine(spec)
+    plan = build_plan(spec, design)
+    narrow = narrowest_feature(plan)
+    voxel = args.voxel if args.voxel > 0 else round(narrow / 3.0, 3)
+
+    os.makedirs(args.out, exist_ok=True)
+    print(f"{spec.get('name')}: narrowest feature {narrow:.2f} mm -> "
+          f"meshing at {voxel:.3f} mm")
+
+    built: dict[str, dict] = {t: {} for t in tiers}
+    reports: dict[str, list] = {t: [] for t in tiers}
+
+    for part in design.assembly.profiles:
+        t0 = time.time()
+        feats = features_for(design, part)
+        raw_v, raw_f = build_mesh_streaming(design.assembly.profiles[part],
+                                            voxel_mm=voxel, **feats)
+        raw = len(raw_f)
+        # The field the part was meshed from, asked at arbitrary points. Both
+        # tiers come off the same mesh and are measured against the same
+        # surface, so the only thing that differs between them is how much
+        # error each was allowed to spend.
+        sample = part_sampler(design.assembly.profiles[part], **feats)
+        print(f"  {part:11s} meshed {raw:9d} tris in {time.time() - t0:.0f}s",
+              flush=True)
+
+        for tier in tiers:
+            t1 = time.time()
+            v, f, rep = reduce_safely(raw_v, raw_f, TIERS[tier]["keep"],
+                                      sample=sample,
+                                      budget_mm=TIERS[tier]["budget_mm"])
+            # Onto the write grid first, so the mesh that is checked below is
+            # the mesh that reaches the file, down to the last decimal.
+            v, f = snap_to_the_written_grid(v, f)
+            # The ladder runs on the cheap checks and a small sample; the part
+            # that actually gets written is asked both expensive questions
+            # once, here.
+            rep = check(v, f, rep["label"], deep=True)
+            rep["deviation"] = field_deviation(v, f, sample)
+            built[tier][part] = (v, f)
+            reports[tier].append((part, raw, rep, time.time() - t1))
+            print(f"    {tier:8s} {time.time() - t1:5.0f}s  {raw:9d} -> "
+                  f"{len(f):8d} tris  {rep['label']:10s} "
+                  f"watertight {str(rep['watertight']):5s} "
+                  f"genus {rep['genus']:5d}  sealed {len(rep['sealed'])}  "
+                  f"loose {len(rep['loose'])}  flat {rep['degenerate_faces']}  "
+                  f"pinch {rep['nonmanifold_vertices']}  "
+                  f"{rep['volume_mm3'] / 1000:8.2f} cm3  "
+                  f"dev rms {rep['deviation']['rms_mm'] * 1000:5.1f} um  "
+                  f"max {rep['deviation']['max_mm'] * 1000:5.1f} um", flush=True)
+        del raw_v, raw_f
+
+    # Every tier is checked before any tier is written. A refusal is about the
+    # engine, not about one file, and writing the tier that happened to come
+    # first would leave half an answer on disk.
+    bad = []
+    for tier in tiers:
+        bad += [f"[{tier}] {b}" for b in refusals(reports[tier])]
     if bad:
         raise SystemExit("refusing to write a print file:\n  " + "\n  ".join(bad))
 
-    path = os.path.join(args.out, f"{spec.get('name', 'engine')}.3mf")
-    write_3mf(path, parts)
-    total = sum(len(f) for _, f in parts.values())
-    print(f"\nwrote {path}  {os.path.getsize(path) / 1e6:.1f} MB, "
-          f"{total:,} triangles, {len(parts)} solids")
-    print(f"equivalent binary STL would be {(84 + total * 50) / 1e6:.0f} MB")
+    name = spec.get("name", "engine")
+    for tier in tiers:
+        parts = built[tier]
+        path = os.path.join(args.out, f"{name}{TIERS[tier]['suffix']}.3mf")
+        write_3mf(path, parts)
+        total = sum(len(f) for _, f in parts.values())
+        worst = max(r["deviation"]["rms_mm"] for _, _, r, _ in reports[tier])
+        print(f"\nwrote {path}  {os.path.getsize(path) / 1e6:.1f} MB, "
+              f"{total:,} triangles, {len(parts)} solids")
+        print(f"  {tier}: within {TIERS[tier]['budget_mm'] * 1000:.0f} um rms of "
+              f"the field beyond what meshing already cost; worst part reads "
+              f"{worst * 1000:.1f} um rms")
 
 
 if __name__ == "__main__":

@@ -22,12 +22,26 @@ Built on [PicoGK](https://picogk.org) and the LEAP 71 ShapeKernel, both Apache-2
 
 ## The printable engine
 
-[regen-spike-75.3mf](https://github.com/DanielTea/aerospike-ce/releases/download/v0.1.0/regen-spike-75.3mf)
-— three solids, 21.8 million triangles, 21.8 kg in GRCop-42, meshed at 0.233 mm
-with all 556 cooling channels and 96 injector orifices in it. Every part
-watertight, no cavity without a way out, and the head's genus checked against
-the handles its features imply. See [docs/print](docs/print/README.md) for what
-is checked, what is not, and what is wrong with the head manifolds.
+Three solids in one 3MF, 20.75 kg in GRCop-42, meshed at 0.233 mm with all 556
+cooling channels and 96 injector orifices in it. Every part watertight, no
+cavity without a way out, nothing a slicer refuses, and the distance from the
+field it was meshed from measured rather than assumed.
+
+It is written twice, from one meshing, differing only in how much shape error
+decimation was allowed to spend:
+
+| | triangles | size | rms from the field |
+|---|---|---|---|
+| `regen-spike-75.3mf` | 15,428,890 | 191 MB | 6.9 – 13.0 µm |
+| `regen-spike-75-compact.3mf` | 5,488,032 | 72 MB | 12.1 – 18.4 µm |
+
+Twelve microns is a third of a layer at 30 µm and a fiftieth of the thinnest
+wall, so the compact file is the same part to a printer. Both are built and
+gated by the
+[`print file` workflow](https://github.com/DanielTea/aerospike-ce/actions/workflows/print-file.yml)
+and downloadable from its latest green run. See
+[docs/print](docs/print/README.md) for what is checked, what is not, and what is
+wrong with the head manifolds.
 
 ## What this is and is not
 

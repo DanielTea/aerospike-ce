@@ -1,8 +1,8 @@
 name: print file
 
-# Build the print file and hand it back as a downloadable artifact.
+# Build the print files and hand them back as downloadable artifacts.
 #
-# It is 409 MB, which is too big for git and does not belong in history anyway:
+# They are 191 MB and 72 MB, too big for git and not history's business anyway:
 # the generator is the thing worth versioning. A release asset is the natural
 # home for it, but publishing one needs permissions a CI job should not have --
 # so the job builds it, gates it, and attaches it to its own run. Anyone with
@@ -68,6 +68,10 @@ jobs:
           SPEC: ${{ inputs.spec || 'spec/regen.json' }}
         run: python print_ready.py --spec "../$SPEC" --out ../docs/print
 
+      # Every file gets its own run of the gate. The compact one is not a
+      # derivative that inherits the full one's result -- it is a different
+      # mesh, and the whole point of writing it is that it went further, so it
+      # is the one more likely to have gone too far.
       - name: gate
         working-directory: validate
         # A literal block, not a folded one: YAML joins the lines of a plain
@@ -76,54 +80,83 @@ jobs:
         # twenty-four minutes building the file and then handed argparse an
         # argument called " --json ../out/release.json".
         run: |
-          python pipeline.py \
-            --file "$(ls ../docs/print/*.3mf | head -1)" \
-            --json ../out/release.json
+          for f in ../docs/print/*.3mf; do
+            tag=$(basename "$f" .3mf)
+            echo "::group::gate $tag"
+            python pipeline.py --file "$f" --json "../out/release-$tag.json"
+            echo "::endgroup::"
+          done
 
       - name: summary
         if: always()
         run: |
           python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
           import glob, json, os
-          f = sorted(glob.glob("docs/print/*.3mf"))
-          print("## Print file\n")
-          if f:
-              print(f"`{os.path.basename(f[0])}` — {os.path.getsize(f[0]) / 1e6:.1f} MB\n")
-          try:
-              d = json.load(open("out/release.json"))
-          except OSError:
-              print("No report: the build refused to write, or never got that far.")
+          print("## Print files\n")
+          files = sorted(glob.glob("docs/print/*.3mf"))
+          if not files:
+              print("Nothing written: the build refused, or never got that far.")
               raise SystemExit
-          print(f"Release gate: **{'PASS' if d['ok'] else 'FAIL'}**\n")
-          print("| stage | result | checks | seconds |")
-          print("|---|---|---|---|")
-          for s in d["stages"]:
-              print(f"| {s['name']} | {'ok' if s['ok'] else '**FAIL**'} "
-                    f"| {len(s['checks'])} | {s['seconds']:.0f} |")
-          bad = [c for s in d["stages"] for c in s["checks"]
-                 if not c["ok"] and not c["skipped"]]
-          if bad:
-              print("\n### Failed\n")
-              for c in bad:
-                  print(f"- **{c['name']}** — {c['detail']}")
+          print("| file | size | gate |")
+          print("|---|---|---|")
+          reports = {}
+          for f in files:
+              tag = os.path.basename(f)[:-4]
+              try:
+                  reports[tag] = json.load(open(f"out/release-{tag}.json"))
+                  verdict = "**PASS**" if reports[tag]["ok"] else "**FAIL**"
+              except OSError:
+                  verdict = "not reached"
+              print(f"| `{os.path.basename(f)}` "
+                    f"| {os.path.getsize(f) / 1e6:.1f} MB | {verdict} |")
+          print()
+          for tag, d in reports.items():
+              print(f"### {tag}\n")
+              print("| stage | result | checks | seconds |")
+              print("|---|---|---|---|")
+              for st in d["stages"]:
+                  print(f"| {st['name']} | {'ok' if st['ok'] else '**FAIL**'} "
+                        f"| {len(st['checks'])} | {st['seconds']:.0f} |")
+              bad = [c for st in d["stages"] for c in st["checks"]
+                     if not c["ok"] and not c["skipped"]]
+              if bad:
+                  print("\nFailed:\n")
+                  for c in bad:
+                      print(f"- **{c['name']}** — {c['detail']}")
+              print()
           PY
 
-      # The file goes out only if the gate passed. A print file that failed its
+      # The files go out only if the gate passed. A print file that failed its
       # own checks is exactly what this repository refuses to hand anyone.
+      #
+      # Two artifacts rather than one containing both, because the whole reason
+      # the compact file exists is that someone did not want to download the
+      # full one. Putting them in the same artifact means downloading both.
       - name: upload the print file
         uses: actions/upload-artifact@v4
         with:
           name: print-file
-          path: docs/print/*.3mf
+          path: |
+            docs/print/*.3mf
+            !docs/print/*-compact.3mf
           retention-days: ${{ inputs.retention_days || 30 }}
           compression-level: 0        # 3MF is already a zip
           if-no-files-found: error
 
-      - name: upload the report
+      - name: upload the compact print file
+        uses: actions/upload-artifact@v4
+        with:
+          name: print-file-compact
+          path: docs/print/*-compact.3mf
+          retention-days: ${{ inputs.retention_days || 30 }}
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: upload the reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: release-report
-          path: out/release.json
+          path: out/release-*.json
           retention-days: ${{ inputs.retention_days || 30 }}
           if-no-files-found: warn
