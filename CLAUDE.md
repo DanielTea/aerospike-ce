@@ -245,10 +245,17 @@ the entire job of decimation.
 
 ## The print file is written twice
 
-`full` and `compact`, from one meshing, differing only in that budget: 3 µm of
-added rms drift for the reference and 12 µm for the compact one. Twelve microns
-is a third of a layer and a fiftieth of the thinnest wall, so the compact file
-is the same part to a printer and not to a measuring machine.
+`full` and `compact`, from one meshing. The reference tier decimates by nothing
+at all and that is deliberate: any ratio is a judgement about how much fidelity
+is worth how many megabytes, and the point of a reference is that no such
+judgement has been made in it. It is the mesh the field produced.
+
+Measuring says a tenth of it -- keep 0.30 -- costs 1.4 µm of added rms drift
+against a mesher whose own error is 11.6 µm, which is a perfectly good trade and
+still a trade. The compact tier is where trades are made, it is labelled, and it
+carries a budget: 12 µm of added rms, a third of a layer at 30 µm and a
+fiftieth of the thinnest wall. The same part to a printer, not to a measuring
+machine.
 
 A coarser *voxel* is not the way to a smaller file and never will be. The 0.233
 mm voxel is set by the 0.70 mm hot wall; below it the channels shred into

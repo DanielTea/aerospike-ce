@@ -76,19 +76,26 @@ LADDER_SAMPLE = 150_000
 
 # The two files this writes, and the only thing that differs between them.
 #
-# Both are meshed from the same field at the same voxel, both go through the
-# same gates, and both are refused on the same terms. What separates them is
-# how much shape error decimation is allowed to add, in rms distance from the
-# surface the field defines:
+# Both are meshed from the same field at the same voxel and both go through the
+# same gates. What separates them is how many triangles come off afterwards.
 #
-#   full     3 um -- decimate only where it is nearly free. The reference.
-#   compact 12 um -- decimate until the ladder or the budget stops it.
+#   full     every triangle marching cubes produced, kept.
+#   compact  decimated to the lowest rung each part survives, within 12 um of
+#            added rms drift from the surface the field defines.
+#
+# The reference tier decimates by nothing at all, on purpose. Any ratio is a
+# judgement about how much fidelity is worth how many megabytes, and the point
+# of having a reference is that no such judgement has been made in it: it is
+# the mesh the field produced. Measuring says a tenth of that -- keep 0.30 --
+# costs 1.4 um of rms drift against a mesher whose own error is 11.6 um, which
+# is a perfectly good trade and still a trade. The compact file is where trades
+# are made, and it is labelled.
 #
 # Twelve microns is a third of a layer at 30 um and a fiftieth of the thinnest
 # wall in the engine, so the compact file is the same part to a printer. It is
 # not the same part to a measuring machine, which is why both exist.
 TIERS = {
-    "full":    dict(keep=0.30, budget_mm=0.003, suffix=""),
+    "full":    dict(keep=1.00, budget_mm=None, suffix=""),
     "compact": dict(keep=0.02, budget_mm=0.012, suffix="-compact"),
 }
 
@@ -246,6 +253,13 @@ def reduce_safely(verts, faces, target_ratio: float, tol_volume: float = 0.02,
                 if sample is not None and budget_mm is not None else None)
     if base_dev is not None:
         base["deviation_rms_mm"] = base_dev["rms_mm"]
+
+    if target_ratio >= 1.0:
+        # Nothing to decide: this tier ships what marching cubes produced. The
+        # deviation is still measured, because it is the floor every other tier
+        # is read against -- "18 um rms" means nothing until you know the mesh
+        # it came from was already 12.
+        return (verts, faces, base)
 
     # Hardest first, and take the first rung that survives.
     #
@@ -479,9 +493,11 @@ def main() -> None:
         worst = max(r["deviation"]["rms_mm"] for _, _, r, _ in reports[tier])
         print(f"\nwrote {path}  {os.path.getsize(path) / 1e6:.1f} MB, "
               f"{total:,} triangles, {len(parts)} solids")
-        print(f"  {tier}: within {TIERS[tier]['budget_mm'] * 1000:.0f} um rms of "
-              f"the field beyond what meshing already cost; worst part reads "
-              f"{worst * 1000:.1f} um rms")
+        budget = TIERS[tier]["budget_mm"]
+        print(f"  {tier}: " + ("undecimated" if budget is None else
+                               f"within {budget * 1000:.0f} um rms of the field "
+                               f"beyond what meshing already cost")
+              + f"; worst part reads {worst * 1000:.1f} um rms")
 
 
 if __name__ == "__main__":

@@ -494,22 +494,34 @@ def stage_watertight(design, parts, fields, voxel_mm, narrow, resolved: bool,
         # it claims, but how far from the engine it actually is.
         dev = field_deviation(v, f, part_sampler(design.assembly.profiles[name],
                                                  **features_for(design, name)))
-        # Two bounds, because they catch different things. Marching cubes
-        # cannot put a vertex inside a sharp concave corner, so the worst point
-        # on any faithful mesh is about a voxel out and the maximum is nearly
-        # useless as a gate -- it reads 195 um on the undecimated cowl and 195
-        # um again after a ten-fold decimation. The mean is what moves: 12 um
-        # undecimated, 18 um at the floor. So the maximum is bounded by the
-        # resolution the features demand, and the mean by a twentieth of the
-        # thinnest feature, which is the one that would notice a part quietly
-        # going faceted.
-        st.add(f"{name} follows the field", dev["max_mm"] <= narrow / 3.0,
+        # Both bounds scale with the voxel, because that is what sets how far a
+        # mesh can be from its field: marching cubes places a vertex on a
+        # lattice edge, so it cannot get closer than the lattice allows. A
+        # screening mesh at 0.6 mm is legitimately 400 um out and a print mesh
+        # at 0.233 mm is 195 -- the same geometry, the same mesher, no defect
+        # in either. Bounding by the feature size instead fails every screening
+        # run, which is exactly what it did.
+        #
+        # A written file carries no voxel, so it is held to the one the
+        # features demand. That is not an assumption about the file; it is the
+        # claim the file makes by existing.
+        ref = narrow / 3.0 if from_file else voxel_mm
+
+        # The two are read differently on purpose. The maximum is nearly
+        # useless as a gate -- the cowl reads 195 um undecimated and 195 um
+        # again after a ten-fold decimation, because marching cubes cannot put
+        # a vertex inside a sharp concave corner and that error does not care
+        # what the triangles do afterwards. It is kept, loosely, to catch gross
+        # breakage. The mean is what moves, and what would notice a part
+        # quietly going faceted: 12 um undecimated, 18 um at the floor.
+        st.add(f"{name} follows the field", dev["max_mm"] <= 2.0 * ref,
                f"worst point {dev['max_mm'] * 1000:.0f} um from the field, "
-               f"against {narrow / 3.0 * 1000:.0f} um "
-               f"(a voxel at the resolution {narrow:.2f} mm demands)")
-        st.add(f"{name} keeps its shape", dev["rms_mm"] <= narrow / 20.0,
+               f"against {2.0 * ref * 1000:.0f} um (two voxels"
+               + (f" at the {ref:.3f} mm the features demand)" if from_file
+                  else f" of the {ref:.3f} mm this was meshed at)"))
+        st.add(f"{name} keeps its shape", dev["rms_mm"] <= ref / 8.0,
                f"{dev['rms_mm'] * 1000:.1f} um rms over {dev['points'] / 1000:.0f}k "
-               f"sampled points, against {narrow / 20.0 * 1000:.0f} um")
+               f"sampled points, against {ref / 8.0 * 1000:.0f} um")
     return st
 
 

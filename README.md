@@ -27,12 +27,13 @@ cooling channels and 96 injector orifices in it. Every part watertight, no
 cavity without a way out, nothing a slicer refuses, and the distance from the
 field it was meshed from measured rather than assumed.
 
-It is written twice, from one meshing, differing only in how much shape error
-decimation was allowed to spend:
+It is written twice, from one meshing. The first keeps every triangle marching
+cubes produced; the second is decimated as far as each part survives, within a
+stated budget of shape drift:
 
 | | triangles | size | rms from the field |
 |---|---|---|---|
-| `regen-spike-75.3mf` | 15,428,890 | 191 MB | 6.9 – 13.0 µm |
+| `regen-spike-75.3mf` | 51,429,650 | 531 MB | 5.5 – 11.7 µm |
 | `regen-spike-75-compact.3mf` | 5,488,032 | 72 MB | 12.1 – 18.4 µm |
 
 Twelve microns is a third of a layer at 30 µm and a fiftieth of the thinnest

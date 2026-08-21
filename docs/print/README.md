@@ -4,9 +4,10 @@ A checked, print-resolution model of the whole engine: three solids in one 3MF,
 dimensioned in millimetres, with every cooling channel, injector orifice and
 mounting hole in it.
 
-It is written twice. `regen-spike-75.3mf` is the reference and
-`regen-spike-75-compact.3mf` is the same engine at `a third` of the
-triangles, because a slicer that has to open half a gigabyte usually does not.
+It is written twice. `regen-spike-75.3mf` is the reference -- every triangle
+marching cubes produced, kept -- and `regen-spike-75-compact.3mf` is the same
+engine at a tenth of them, because a slicer that has to open half a gigabyte
+usually does not.
 
 > **The published v0.1.0 asset is superseded.** It was built before the slicing
 > gates existed and carries **6,334 triangles with no area** -- 793 on the
@@ -72,10 +73,17 @@ Both are meshed from the same field at the same voxel and go through the same
 five stages. The only thing that differs is how much shape error decimation was
 allowed to spend, measured as rms distance from the surface the field defines:
 
-| | budget | triangles | size | rms from the field |
+| | decimation | triangles | size | rms from the field |
 |---|---|---|---|---|
-| `regen-spike-75.3mf` | 3 µm | 15,428,890 | 191 MB | 6.9 – 13.0 µm |
-| `regen-spike-75-compact.3mf` | 12 µm | 5,488,032 | 72 MB | 12.1 – 18.4 µm |
+| `regen-spike-75.3mf` | none | 51,429,650 | 531 MB | 5.5 – 11.7 µm |
+| `regen-spike-75-compact.3mf` | to the floor, within 12 µm | 5,488,032 | 72 MB | 12.1 – 18.4 µm |
+
+The reference decimates by nothing at all, deliberately. Any ratio is a
+judgement about how much fidelity is worth how many megabytes, and the point of
+having a reference is that no such judgement has been made in it. Measuring says
+a tenth of it costs 1.4 µm of added rms drift against a mesher whose own error
+is 11.7 µm -- a perfectly good trade, and still a trade. The compact file is
+where trades are made, and it says so on the label.
 
 Twelve microns is a third of a layer at 30 µm and a fiftieth of the thinnest
 wall in the engine, so the compact file is the same part *to a printer*. It is
@@ -97,24 +105,22 @@ watertight, no boundary or non-manifold edges, no cavity without a way out, no
 zero-area triangle, no duplicated face, no patch wound inside out and no vertex
 where the surface pinches -- checked on the grid the file is written on.
 
-| part | meshed | full | compact | genus | volume | mass |
+| part | full (as meshed) | compact | keep | genus | volume | mass |
 |---|---|---|---|---|---|---|
-| centrebody | 16,442,380 | 4,932,712 | 1,731,072 | 328 | 402.49 cm3 | 3.524 kg |
-| cowl | 23,949,512 | 7,184,852 | 2,873,940 | 393 | 392.84 cm3 | 3.440 kg |
-| head | 11,037,758 | 3,311,326 | 883,020 | 281 | 1574.58 cm3 | 13.787 kg |
+| centrebody | 16,442,380 | 1,731,072 | 0.02 | 328 | 402.49 cm3 | 3.524 kg |
+| cowl | 23,949,512 | 2,873,940 | 0.12 | 393 | 392.84 cm3 | 3.440 kg |
+| head | 11,037,758 | 883,020 | 0.08 | 281 | 1574.58 cm3 | 13.787 kg |
 
-15,428,890 triangles at 191 MB, or 5,488,032 at 72 MB. 20.75 kg either way --
+51,429,650 triangles at 531 MB, or 5,488,032 at 72 MB. 20.75 kg either way --
 the volumes agree to two decimal places in cm3, which is what "the same engine"
 has to mean before anything else is claimed. The equivalent binary STL would be
-771 MB, and would not say what unit it was in.
+2571 MB, and would not say what unit it was in.
 
-Marching cubes emitted 51.4 million triangles between the three parts and both
-files are what survived quadric collapse: the full one at keep 0.30 everywhere,
-the compact one at the lowest rung each part could take -- 0.02 for the
-centrebody, 0.12 for the cowl, 0.08 for the head. The cowl stops highest because
-it is the part carrying 392 channels, and the ladder walks back up until the
-genus, the component count, the volume and the distance from the field all
-survive.
+The compact file stops at the lowest rung each part can take. The cowl stops
+highest because it is the part carrying 392 channels: asked for 0.02 it fails,
+and the ladder walks back up through 0.03, 0.05 and 0.08 until the genus, the
+component count, the volume and the distance from the field all survive at
+0.12.
 
 Vertices are written to six decimal places -- a nanometre -- rather than four,
 and the mesh is snapped onto that grid and welded there *before* it is checked.

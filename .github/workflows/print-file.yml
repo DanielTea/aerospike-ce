@@ -2,7 +2,7 @@ name: print file
 
 # Build the print files and hand them back as downloadable artifacts.
 #
-# They are 191 MB and 72 MB, too big for git and not history's business anyway:
+# They are 531 MB and 72 MB, too big for git and not history's business anyway:
 # the generator is the thing worth versioning. A release asset is the natural
 # home for it, but publishing one needs permissions a CI job should not have --
 # so the job builds it, gates it, and attaches it to its own run. Anyone with
