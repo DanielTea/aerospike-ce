@@ -9,14 +9,26 @@ anything. Read this before making changes.
 **You cannot see the geometry.** The PicoGK viewer is invisible to you. Never
 claim a part "looks right". Verify through the channels you actually have:
 
-1. `validate/` — pytest assertions on the maths and on physical invariants.
+1. `validate/pipeline.py` — the gate. Five stages, in the order a failure
+   propagates: **physics**, **geometry**, **printability**, **watertight**,
+   **slicing**. Every test module in the repo belongs to exactly one of them
+   and the pipeline refuses to run if one belongs to none.
+   `docs/pipeline/README.md` lists every gate and what it catches.
 2. `out/contour.png`, `out/engine.png`, `out/engine_3d.png` — rendered plots you
    can read with your image tools.
-3. Mesh closure — `validate/mesh_export.py` reports watertightness, Euler
-   characteristic, and mesh volume against the analytic volume. A solid that
-   does not close fails here without anyone looking at it.
+3. `validate/verify_print_file.py` — reopens a written 3MF as a stranger would
+   and re-derives everything from what is on disk.
 
-If a change is not covered by one of these, add coverage before making it.
+If a change is not covered by one of these, add coverage before making it. If
+you add a gate, add it to a stage; a check nobody runs is a check nobody has.
+
+**Watertight is not the same as printable.** Four separate defects have shipped
+past a mesh that reported watertight with the correct genus: a zero-area
+triangle, a duplicated face, a patch wound inside out, and a vertex where the
+surface pinches against itself. Every one of them is an ordinary face by index
+— two neighbours per edge, so the edge arithmetic is content — and every one of
+them is something a slicer reads and refuses. That is why there is a slicing
+stage, and why "it is watertight" is not a claim that the part will print.
 
 ## Python owns the physics, C# owns the voxels
 
@@ -55,6 +67,8 @@ The Python in `validate/` is the source of truth for the physics. The C# in
 4. Run `python plot_contour.py --spec ../spec/demo.json --out ../out`, then
    `python plot_engine.py`, then `python mesh_export.py`.
 5. **Actually look at the PNGs.** Read the images. Do not skip this.
+5b. Run `python pipeline.py`. Not `pytest`: the suite is one gate out of four,
+   and the three below it are where the defects that actually shipped were.
 6. Only then port the change to `model/`.
 7. `python build_plan.py`, then `dotnet run --project model -- out/plan.json`.
    There is nothing left to cross-check: the C# does not compute numbers, it
@@ -90,10 +104,13 @@ the two is the failure mode this structure exists to prevent.
 | `validate/mesh_solid.py` | SDF + marching cubes | for anything not axisymmetric |
 | `validate/mesh_export.py` | revolve to STL, cutaway PNG | exact, axisymmetric only |
 | `validate/test_*.py` | invariants | add a test before adding physics |
+| `validate/pipeline.py` | the gate: physics, geometry, watertight, slicing | every test belongs to a stage |
 | `validate/plot_contour.py` | contour PNG | your eyes on the nozzle |
 | `validate/plot_engine.py` | assembly PNG + area schedule | your eyes on the engine |
 | `validate/plot_cooled.py` | section views through the field | your eyes on the channels |
 | `validate/export_cooled.py` | cooled STLs + topology check | |
+| `validate/print_ready.py` | the checked print file | refuses rather than writes |
+| `validate/verify_print_file.py` | reopens a written 3MF and re-derives everything | checks the writer, not the mesher |
 | `validate/build_plan.py` | writes the plan C# reads | the seam; shapes only |
 | `model/BuildPlan.cs` | reads the plan | refuses a version it does not know |
 | `model/CooledGeometry.cs` | SDFs for every feature | mirror of `mesh_solid.py` |
@@ -169,6 +186,97 @@ resolve. `export_cooled.py` derives the voxel size from the narrowest feature,
 checks the Euler characteristic against what the features imply, and only
 decimates as far as the topology survives -- pushed further, quadric collapse
 closes a cooling channel and leaves a mesh that still looks perfectly fine.
+
+## A print file is a claim, and it gets checked
+
+`print_ready.py` writes 3MF, not STL: STL is a triangle soup with no units in
+it, and every slicer guessing millimetres correctly is not the same as being
+told. It refuses to write at all unless every part is watertight and no part has
+a sealed void.
+
+Sealed voids, not component counts. A part with internal cavities is not broken
+-- the head disc is one solid plus two plenum surfaces, and those cavity
+surfaces carry *negative* volume, so counting connected components rejects every
+hollow part ever printed. What is actually broken is a cavity with no way out,
+because it stays full of powder for ever. That check is what caught the injector
+orifices no longer reaching their plenums after the manifolds were resized.
+
+Two things that looked like geometry bugs and were not:
+
+- Several hundred "sealed voids" in the cowl at a 0.7 mm test voxel. The channel
+  is 0.8 mm wide. Testing a part below its own resolution floor shreds the
+  channels into fragments and reports every fragment. Check the voxel before
+  believing the finding.
+- The head reporting three "components". One solid, two cavity surfaces.
+
+## Marching cubes places its vertices in single precision
+
+Two failures now, from the same cause at two scales.
+
+The systematic one: a flat face normal to the axis lands on a lattice plane,
+every sample there reads exactly zero, and marching cubes emits a sheet of
+degenerate triangles with holes between them. `SURFACE_BIAS_MM` moves the level
+a tenth of a micron off the zero set and that whole class goes away.
+
+The sporadic one is not fixed by a bias, because it is not about where the
+level is. Marching cubes interpolates in *index* units, in float32. Out at
+index 1024 a float32 resolves about 6e-5 of an index, so a crossing at t = 2e-5
+is placed exactly **on** the sample rather than beside it — and so is every
+other edge into that sample. The weld then merges what marching cubes meant to
+keep apart, and the surface pinches: one edge shared by four faces, no boundary
+anywhere, an odd Euler characteristic, nothing whatsoever to see. The cowl did
+it once in 24 million triangles, at a sample 95 nanometres above a channel
+floor and so five below the level being meshed, and it took a lattice sweep to
+prove it was arithmetic rather than geometry — sliding
+the grid 0.08 mm made it vanish.
+
+`hold_off_level` is the cure: no sample is allowed within a derived band of the
+level, and samples inside it are pushed to the side they were already on, so no
+cell changes classification and the surface moves by at most a micron. The band
+comes from how far out the indices go and how fast the field can change between
+neighbours, because those are the two things that set it — not from a constant
+someone liked the look of.
+
+The general lesson: **a fix that works at one grid alignment is not a fix.**
+Sweep the lattice offset, the same way geometry gets swept over the parameter
+range.
+
+## Check the mesh on the grid the file is written on
+
+A 3MF carries coordinates as decimal text, so writing quantises. Check in
+memory and write afterwards and the two are different meshes: the first print
+file built with the level guard reported no zero-area triangles anywhere in
+memory and came back off disk with 416 of them.
+
+The guard and the writer were arguing about the same decimal place --
+`level_guard_mm` separates a vertex from its sample by about 1.5e-4 mm and the
+writer used four decimals, a tenth of a micron. Both were individually correct.
+
+Two rules follow. A writer's precision is part of the geometry, not a
+formatting choice, and it has to sit *well under* the smallest separation the
+mesher can produce rather than level with it. And quantise before checking, not
+after: `snap_to_the_written_grid` rounds and then welds, so the vertices that
+land on the same point merge and the faces that then have two identical corners
+come out without opening the surface. What the gate reads is what a slicer
+opens, down to the last decimal.
+
+## The gate has a memory budget too, and it is easy to spend
+
+Checking a mesh costs more than holding it. The cowl's print mesh is 900 MB;
+one pass of the gate over it wanted 13.7 GB and the kernel killed the build
+halfway through. None of that was the geometry -- it was numpy being asked for
+the obvious thing four times over. `np.unique(edges, axis=0)` views seventy-two
+million rows as a void dtype and sorts that, several copies deep, when the two
+indices fit in one int64 and it could be an in-place 1-D sort. `v[f[:, 0]]`
+gathers 1.7 GB of corners before any arithmetic happens, and four separate
+routines wanted to do it.
+
+So: pack indices into integers instead of sorting rows, count with `bincount`
+instead of `unique`, do per-face vector maths a couple of million faces at a
+time, and measure the peak on a mesh the size of the real one before running
+anything that takes an hour. `resource.getrusage(...).ru_maxrss` and a
+synthetic torus of the right size will tell you in ninety seconds what a print
+build tells you in forty minutes.
 
 ## Voxel resolution
 

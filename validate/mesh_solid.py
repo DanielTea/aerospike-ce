@@ -52,6 +52,65 @@ AXIS_EPS = 1e-9
 SURFACE_BIAS_MM = 1e-4
 
 
+def level_guard_mm(shape, voxel_mm: float) -> float:
+    """
+    How far a sample has to stay from the level for its vertex to be distinct.
+
+    Two things set it. A float32 index carries about `n * 2^-24` of absolute
+    resolution, where n is how far out the indices go; eight of those puts the
+    vertex unambiguously beside the sample rather than on it. And the field is
+    a distance function, so it changes by at most a voxel between neighbours --
+    doubled here, because a channel floor riding an inclined wall is steeper
+    than one, and the band has to hold for the steepest edge in the block.
+    """
+    return 8.0 * max(shape) * 2.0 ** -24 * (2.0 * voxel_mm)
+
+
+def hold_off_level(block: np.ndarray, voxel_mm: float,
+                   level: float = SURFACE_BIAS_MM) -> np.ndarray:
+    """
+    Push samples out of the band around the level, each to the side it was on.
+
+    The bias moves the level off the zero set, which is what stops a flat face
+    landing on a lattice plane from meshing as a sheet of degenerate triangles.
+    It does not stop the same thing happening to one sample in a hundred
+    million by chance, and that is a different failure with a different cure.
+
+    Marching cubes places a vertex along a grid edge at t = (level - v0) /
+    (v1 - v0), and it works in *index* units, in single precision. Out at index
+    1024 a float32 resolves about 6e-5 of an index, so a crossing with t below
+    that lands exactly on the sample instead of just beside it -- and every
+    other edge into that sample lands there too. The weld then merges what
+    marching cubes meant to keep apart, and the surface pinches: one edge shared
+    by four faces, no boundary anywhere, an odd Euler characteristic, and
+    nothing whatsoever to see. The cowl did it once in 24 million triangles, at a
+    sample 95 nanometres above a channel floor and so five below the level being
+    meshed; sliding the lattice 0.08 mm made it vanish, which is how you tell
+    arithmetic from geometry.
+
+    Pushed to the same side, so no cell changes classification and the topology
+    is exactly what it was; the surface moves by at most the band, which is
+    about a micron against a 233 micron voxel. Returns the input untouched when
+    nothing is in the band, and a copy otherwise -- the caller's field is not
+    ours to move.
+    """
+    guard = level_guard_mm(block.shape, voxel_mm)
+    near = np.abs(block - level) < guard
+    if not near.any():
+        return block
+    out = block.copy()
+    out[near] = np.where(block[near] >= level, level + guard, level - guard)
+    return out
+
+
+def _mesh_block(block: np.ndarray, voxel_mm: float, level: float = SURFACE_BIAS_MM):
+    """Marching cubes over one block, with every sample held off the level."""
+    block = hold_off_level(block, voxel_mm, level)
+    verts, faces, _, _ = marching_cubes(block, level=level,
+                                        spacing=(voxel_mm, voxel_mm, voxel_mm))
+    return verts, faces
+
+
 # --------------------------------------------------------------------------
 # 2D signed distance in the meridional plane
 # --------------------------------------------------------------------------
@@ -231,13 +290,20 @@ class LugAdd:
 
 @dataclass(frozen=True)
 class HoleCut:
-    """A ring of axial holes, for injector orifices."""
+    """
+    A ring of axial holes.
+
+    Named, because the head carries two kinds -- injector orifices and mounting
+    bolt holes -- in one list, and a check that wants one of them has no other
+    way to tell which is which than picking an index and hoping.
+    """
     radius_mm: float            # ring radius on the face
     diameter_mm: float
     count: int
     x_start: float
     x_end: float
     phase: float = 0.0
+    name: str = ""
 
 
 def _channel_sdf(X, R, TH, cut: ChannelCut) -> np.ndarray:
@@ -277,13 +343,62 @@ def _port_sdf(X, R, TH, cut: PortCut) -> np.ndarray:
     return np.maximum(np.maximum(d_theta, d_axial), d_radial).astype(np.float32)
 
 
+def plenum_fillet_mm(half_x: float, half_r: float) -> float:
+    """Radius the diamond's corners are rounded to."""
+    return min(0.4, 0.25 * half_r, 0.25 * half_x)
+
+
+def plenum_section(half_x: float, half_r: float):
+    """
+    The rhombus that, offset outward by the fillet, gives the plenum section.
+
+    Shrunk by the fillet measured perpendicular to the faces, not by subtracting
+    it from the half-diagonals. On a ten-to-one section those are not remotely
+    the same thing: taking a fifth of a millimetre off a 20 mm half-diagonal
+    barely moves the face it belongs to, and the rounded shape ends up eighteen
+    percent *larger* than the diamond it was supposed to fit inside.
+    """
+    rad = plenum_fillet_mm(half_x, half_r)
+    face = half_x * half_r / math.hypot(half_x, half_r)   # centre to face
+    k = max(1.0 - rad / face, 1e-6)
+    return half_x * k, half_r * k, rad
+
+
+def plenum_section_area_mm2(half_x: float, half_r: float) -> float:
+    """Flow area of the filleted section: rhombus, plus its offset band."""
+    a, b, rad = plenum_section(half_x, half_r)
+    return 2.0 * a * b + 4.0 * math.hypot(a, b) * rad + math.pi * rad * rad
+
+
 def _plenum_sdf(X, R, cut: PlenumCut) -> np.ndarray:
-    """Distance to the diamond ring. Negative inside."""
+    """
+    Distance to the diamond ring, corners filleted. Negative inside.
+
+    The fillet is not cosmetic. A diamond's apex is a mathematically sharp
+    internal edge -- the section closes to zero width there -- and no powder-bed
+    machine makes one: it fills with a radius whether you draw it or not. It is
+    also degenerate to mesh. Sampled exactly on the apex, marching cubes emits a
+    pinch where the surface meets itself, and the part comes back with two
+    non-manifold edges out of fifteen million and no boundary at all, which
+    reads as a watertightness failure with nothing visibly wrong anywhere.
+
+    Exact distance to the rhombus, after Quilez, then offset by the fillet. The
+    half-diagonals are shrunk by the same radius first, so the filleted ring
+    stays inside the envelope its dimensions claim rather than growing past it.
+    """
     rc = cut.r_inner + cut.half_r
-    a, b = max(cut.half_x, 1e-6), max(cut.half_r, 1e-6)
-    # plane distance to |dx|/a + |dr|/b = 1, exact on the faces
-    v = np.abs(X - cut.x_at) / a + np.abs(R - rc) / b - 1.0
-    return (v / math.sqrt(1.0 / (a * a) + 1.0 / (b * b))).astype(np.float32)
+    a, b, rad = plenum_section(cut.half_x, cut.half_r)
+    a, b = max(a, 1e-6), max(b, 1e-6)
+
+    px = np.abs(X - cut.x_at)
+    py = np.abs(R - rc)
+    h = np.clip(((a - 2.0 * px) * a - (b - 2.0 * py) * b) / (a * a + b * b),
+                -1.0, 1.0)
+    qx = px - 0.5 * a * (1.0 - h)
+    qy = py - 0.5 * b * (1.0 + h)
+    d = np.sqrt(qx * qx + qy * qy)
+    sign = np.sign(px * b + py * a - a * b)
+    return (d * sign - rad).astype(np.float32)
 
 
 def _ring_boss_sdf(X, R, boss: RingBoss) -> np.ndarray:
@@ -448,12 +563,7 @@ def build_field(
 
 def mesh_field(field: np.ndarray, origin, voxel_mm: float):
     """Marching cubes at the zero level set, returned in model coordinates."""
-    spacing = (
-        (field.shape[0] - 1) and voxel_mm or voxel_mm,
-        voxel_mm, voxel_mm,
-    )
-    verts, faces, _, _ = marching_cubes(field, level=SURFACE_BIAS_MM,
-                                        spacing=spacing)
+    verts, faces = _mesh_block(field, voxel_mm)
     verts = verts + np.asarray(origin, dtype=float)
     return verts, faces.astype(np.int64)
 
@@ -615,7 +725,9 @@ def centrebody_channels(a: EngineAssembly, channel_spec, back_wall_mm: float = 0
     )
 
 
-def injector_holes(a: EngineAssembly, injector) -> list[HoleCut]:
+def injector_holes(a: EngineAssembly, injector,
+                   x_start_fuel: float | None = None,
+                   x_start_ox: float | None = None) -> list[HoleCut]:
     """Fuel and oxidiser orifice rings through the head disc."""
     # An orifice runs from its plenum to the chamber face, not through the whole
     # block. Once the head was thickened to hold the manifolds, a hole through
@@ -623,14 +735,21 @@ def injector_holes(a: EngineAssembly, injector) -> list[HoleCut]:
     # drill or print straight, and which marching cubes cannot hold together
     # either. The plenums occupy the depth; the orifice is the short run between
     # the plenum's aft face and the chamber.
-    x0 = a.head_x - (a.structure.wall_thickness_mm + 3.0)
+    # One start per ring, because the two rings meet their plenums at different
+    # radii and the plenum section is a diamond: how far aft it reaches depends
+    # on where you meet it. A single shared offset was wrong for both.
+    default = a.head_x - (a.structure.wall_thickness_mm + 3.0)
+    xf = default if x_start_fuel is None else x_start_fuel
+    xo = default if x_start_ox is None else x_start_ox
     x1 = a.head_x + 1.0
     half_pitch = math.pi / injector.n_elements
     return [
         HoleCut(injector.fuel_ring_radius * 1e3, injector.d_fuel_mm,
-                injector.n_elements, x0, x1, phase=0.0),
+                injector.n_elements, xf, x1, phase=0.0,
+                name="fuel_orifice"),
         HoleCut(injector.ox_ring_radius * 1e3, injector.d_ox_mm,
-                injector.n_elements, x0, x1, phase=half_pitch),
+                injector.n_elements, xo, x1, phase=half_pitch,
+                name="ox_orifice"),
     ]
 
 
@@ -688,10 +807,28 @@ def _weld(verts: np.ndarray, faces: np.ndarray, tol: float = 1e-7):
     on it to the last bit. Without welding the surface is a triangle soup that
     reports boundary edges everywhere the slabs meet, and the topology check
     becomes meaningless.
+
+    A lexsort over three integer columns rather than `np.unique(..., axis=0)`.
+    The latter views the rows as a void dtype and sorts that, several copies
+    deep; at print resolution this runs on twelve million vertices with a
+    twenty-million-triangle mesh already in memory, and the difference is a
+    couple of gigabytes on a machine that has been killed once for wanting
+    them.
     """
+    if not len(verts):
+        return verts, faces
     key = np.round(verts / tol).astype(np.int64)
-    _, first, inverse = np.unique(key, axis=0, return_index=True, return_inverse=True)
-    out_v = verts[first]
+    order = np.lexsort((key[:, 2], key[:, 1], key[:, 0]))
+    sk = key[order]
+    starts = np.empty(len(verts), dtype=bool)
+    starts[0] = True
+    np.any(sk[1:] != sk[:-1], axis=1, out=starts[1:])
+    del sk, key
+    group = np.cumsum(starts) - 1
+    inverse = np.empty(len(verts), dtype=np.int64)
+    inverse[order] = group
+    out_v = verts[order[np.flatnonzero(starts)]]
+    del order, group, starts
     out_f = inverse[faces]
     keep = (out_f[:, 0] != out_f[:, 1]) & (out_f[:, 1] != out_f[:, 2]) & \
            (out_f[:, 2] != out_f[:, 0])
@@ -717,6 +854,7 @@ def build_mesh_streaming(
     plenums: list[PlenumCut] | None = None,
     ribs: list[RibAdd] | None = None,
     legs: list[LegAdd] | None = None,
+    stats: dict | None = None,
 ):
     """
     Marching cubes over the volume in slabs, welded into one mesh.
@@ -729,6 +867,13 @@ def build_mesh_streaming(
     Consecutive slabs overlap by exactly one plane of samples: marching cubes
     consumes cells, not planes, so an overlap of one keeps every cell processed
     exactly once and leaves no seam.
+
+    Pass a dict as `stats` to get the volume of the field back as well. Every
+    plane is evaluated here already, so integrating the occupancy costs one
+    clip and one sum per plane -- and it gives the mesh an independent number
+    to be checked against, by a different route through the same field. Working
+    that volume out analytically instead means modelling every feature a second
+    time and hoping the overlaps cancel.
     """
     channels = channels or []
     holes = holes or []
@@ -778,6 +923,8 @@ def build_mesh_streaming(
     vx = np.asarray(profile.x, dtype=float)
     vr = np.asarray(profile.r, dtype=float)
 
+    occupied = [0.0]                     # cells' worth of metal, summed per plane
+
     def plane(i: int) -> np.ndarray:
         prof1d = _polygon_sdf_radial(xs[i], r_grid, vx, vr)
         d = np.interp(R, r_grid, prof1d).astype(np.float32)
@@ -818,6 +965,10 @@ def build_mesh_streaming(
             d = np.maximum(d, _wedge_sdf(Y.astype(np.float32),
                                          Z.astype(np.float32),
                                          keep_sector[0], keep_sector[1]))
+        if stats is not None:
+            # The partial-cell ramp marching cubes itself uses to place a
+            # vertex, so the two agree to well under the cell rather than to it.
+            occupied[0] += float(np.clip(0.5 - d / voxel_mm, 0.0, 1.0).sum())
         return d
 
     all_v: list[np.ndarray] = []
@@ -836,8 +987,7 @@ def build_mesh_streaming(
         cache = {i1: block[-1].copy()}          # reused as the next slab's first
 
         if block.min() < SURFACE_BIAS_MM < block.max():
-            v, f, _, _ = marching_cubes(block, level=SURFACE_BIAS_MM,
-                                        spacing=(voxel_mm, voxel_mm, voxel_mm))
+            v, f = _mesh_block(block, voxel_mm)
             v = v + np.array([xs[i0], ys[0], zs[0]])
             all_v.append(v)
             all_f.append(f.astype(np.int64) + offset)
@@ -845,6 +995,10 @@ def build_mesh_streaming(
         if progress:
             print(f"  slab {i0:5d}/{nx - 1}  {len(all_f)} pieces", flush=True)
         i0 = i1
+
+    if stats is not None:
+        stats["field_volume_mm3"] = occupied[0] * voxel_mm ** 3
+        stats["grid"] = (nx, ny, nz)
 
     if not all_v:
         raise ValueError("the field never crosses zero; nothing to mesh")
@@ -992,8 +1146,7 @@ def stream_mesh_to_stl(
             carry = block[-1].copy()
 
             if block.min() < SURFACE_BIAS_MM < block.max():
-                v, f, _, _ = marching_cubes(block, level=SURFACE_BIAS_MM,
-                                            spacing=(voxel_mm, voxel_mm, voxel_mm))
+                v, f = _mesh_block(block, voxel_mm)
                 v = v + np.array([xs[i0], ys[0], ys[0]])
                 a, b, c = v[f[:, 0]], v[f[:, 1]], v[f[:, 2]]
                 nrm = np.cross(b - a, c - a)

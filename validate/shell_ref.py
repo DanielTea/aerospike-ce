@@ -265,9 +265,14 @@ def shell_features(design, rib_flank_deg: float = 55.0, leg_count: int = 4,
     out = {part: {"ribs": [], "legs": []} for part in a.profiles}
     sized = {}
 
+    # Only the cowl gets ribs, and that is a geometric fact rather than a
+    # choice. A rib has to stand on a free surface. The centrebody's outer
+    # surface is the plug contour -- it is the gas path, and ribbing it would be
+    # ribbing the nozzle. Its inner surface is the bore that carries fuel aft to
+    # the spike jacket, and ribs there protrude into the flow they are meant to
+    # serve, in a passage that cones to a point. Neither is a place for a rib.
     for part, maker, base in (
-            ("cowl", cowl_channels, (a.cowl_outer_x, a.cowl_outer_r)),
-            ("centrebody", centrebody_channels, (a.cavity_x, a.cavity_r))):
+            ("cowl", cowl_channels, (a.cowl_outer_x, a.cowl_outer_r)),):
         circuit = design.circuits.get(part)
         if circuit is None:
             continue

@@ -4,9 +4,16 @@ obj/
 __pycache__/
 .pytest_cache/
 *.stl
+
+# The print file is a build artifact, and a quarter of a gigabyte of one.
+# It ships as a release asset; docs/print/README.md says how to rebuild it.
+*.3mf
 *.vdb
 .venv/
 venv/
 
 # Dear ImGui window layout, written by the PicoGK viewer on first run
 imgui.ini
+
+# macOS Finder metadata
+.DS_Store

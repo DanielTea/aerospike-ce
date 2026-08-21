@@ -36,7 +36,7 @@ def shell(design):
 # ribs
 # --------------------------------------------------------------------------
 
-def test_there_is_one_rib_per_channel(design, shell):
+def test_there_is_one_rib_per_channel(design, shell):  # noqa: D401
     """
     A rib sits on a land, and there is exactly one land per channel. Any other
     count means the ribs are not on the lands, which is the whole reason they
@@ -169,21 +169,24 @@ def test_the_foot_sits_outboard_of_the_chamber(shell):
 # geometry
 # --------------------------------------------------------------------------
 
-def test_shell_features_land_on_the_right_parts(shell):
+def test_only_the_cowl_is_ribbed(shell):
+    """
+    A rib has to stand on a free surface, and the centrebody has none. Its outer
+    surface is the plug contour -- ribbing that is ribbing the nozzle -- and its
+    inner surface is the bore carrying fuel to the spike jacket, where a rib
+    protrudes into the flow it exists to serve.
+    """
     feats, _, _ = shell
-    assert feats["cowl"]["ribs"] and feats["centrebody"]["ribs"]
-    assert feats["cowl"]["legs"]
+    assert feats["cowl"]["ribs"]
+    assert not feats["centrebody"]["ribs"]
     assert not feats["head"]["ribs"], "the head disc has no channels to rib"
+    assert feats["cowl"]["legs"]
 
 
 def test_rib_direction_matches_its_wall(shell):
-    """
-    The cowl's ribs stand outward from its outer skin; the centrebody's stand
-    inward from its bore. Getting the sign wrong buries them in the part.
-    """
+    """The cowl's ribs stand outward from its skin. Inward would bury them."""
     feats, _, _ = shell
     assert feats["cowl"]["ribs"][0].outward is True
-    assert feats["centrebody"]["ribs"][0].outward is False
 
 
 def test_ribs_sit_between_the_channels(shell, design):

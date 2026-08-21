@@ -15,12 +15,16 @@ import pytest
 
 from engine_ref import assembly_from_spec
 from mesh_export import (
+    duplicate_faces,
     export_assembly,
+    inconsistent_edges,
     manifold_report,
     mesh_volume,
+    nonmanifold_vertices,
     read_binary_stl,
     revolve,
     simplify,
+    slicing_report,
     triangle_soup_volume,
 )
 
@@ -178,3 +182,233 @@ def test_assembly_volume_is_the_sum_of_its_parts(engine, tmp_path):
     rep = export_assembly(engine, str(tmp_path), name="t", n_theta=90)
     parts = sum(r["mesh_volume_mm3"] for k, r in rep.items() if k != "assembly")
     assert rep["assembly"]["mesh_volume_mm3"] == pytest.approx(parts, rel=1e-9)
+
+
+# --------------------------------------------------------------------------
+# 3MF, the format the print file is actually written in
+# --------------------------------------------------------------------------
+
+def _two_parts():
+    """A tetrahedron and a translated copy, as two named solids."""
+    v = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0],
+                  [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]])
+    f = np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]], dtype=np.int64)
+    return {"first": (v, f), "second": (v + np.array([25.0, 0.0, 0.0]), f)}
+
+
+def test_3mf_round_trips_exactly(tmp_path):
+    """
+    Both the writer and the reader stream, because a whole engine is about a
+    gigabyte of XML. Streaming is where an off-by-one in the vertex indices or
+    a dropped chunk boundary would hide, and either produces a file that opens
+    cleanly and is not the part.
+    """
+    from mesh_export import read_3mf, write_3mf
+
+    parts = _two_parts()
+    p = tmp_path / "two.3mf"
+    write_3mf(str(p), parts)
+    back = read_3mf(str(p))
+
+    assert back["unit"] == "millimeter"
+    assert set(back["objects"]) == set(parts)
+    for name, (v, f) in parts.items():
+        v2, f2 = back["objects"][name]
+        assert np.allclose(v2, v, atol=1e-4)
+        assert np.array_equal(f2, f)
+
+
+def test_3mf_survives_a_chunk_boundary(tmp_path):
+    """
+    The writer emits in 65536-element blocks. A mesh larger than one block is
+    the case that exercises the seam; a tetrahedron never would.
+    """
+    from mesh_export import read_3mf, write_3mf
+
+    n = 70000
+    rng = np.random.default_rng(0)
+    v = rng.normal(size=(n, 3)) * 10.0
+    f = np.arange(3 * (n // 3), dtype=np.int64).reshape(-1, 3)
+    p = tmp_path / "big.3mf"
+    write_3mf(str(p), {"slab": (v, f)})
+    v2, f2 = read_3mf(str(p))["objects"]["slab"]
+
+    assert len(v2) == n
+    assert np.array_equal(f2, f)
+    assert np.allclose(v2, v, atol=1e-4)
+
+
+def test_3mf_is_a_well_formed_package(tmp_path):
+    """The three members a 3MF reader looks for, and the relationship between."""
+    import zipfile
+
+    from mesh_export import write_3mf
+
+    p = tmp_path / "pkg.3mf"
+    write_3mf(str(p), _two_parts())
+    with zipfile.ZipFile(p) as z:
+        names = set(z.namelist())
+        assert {"[Content_Types].xml", "_rels/.rels", "3D/3dmodel.model"} <= names
+        rels = z.read("_rels/.rels").decode()
+        assert "/3D/3dmodel.model" in rels
+        model = z.read("3D/3dmodel.model").decode()
+    # every object is placed in the build, or a slicer opens an empty plate
+    assert model.count("<item objectid=") == 2
+
+
+def test_3mf_states_millimetres(tmp_path):
+    """
+    STL carries no unit and every slicer guesses. The guess is usually right,
+    which is not the same as being told -- a part that silently arrives at a
+    twenty-fifth of its size is a wasted build.
+    """
+    import zipfile
+
+    from mesh_export import write_3mf
+
+    p = tmp_path / "unit.3mf"
+    write_3mf(str(p), _two_parts())
+    with zipfile.ZipFile(p) as z:
+        assert 'unit="millimeter"' in z.read("3D/3dmodel.model").decode()
+
+
+# --------------------------------------------------------------------------
+# the gate a slicer applies
+# --------------------------------------------------------------------------
+
+def _cube():
+    """Unit cube, consistently wound outward. Every check here should pass it."""
+    v = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
+                  [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]], dtype=float)
+    f = np.array([[0, 3, 2], [0, 2, 1], [4, 5, 6], [4, 6, 7],
+                  [0, 1, 5], [0, 5, 4], [1, 2, 6], [1, 6, 5],
+                  [2, 3, 7], [2, 7, 6], [3, 0, 4], [3, 4, 7]])
+    return v, f
+
+
+def _tetrahedron(origin):
+    v = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float) \
+        + np.asarray(origin, dtype=float)
+    f = np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]])
+    return v, f
+
+
+def test_a_clean_solid_passes_every_slicing_check():
+    v, f = _cube()
+    rep = slicing_report(v, f)
+    assert rep["degenerate_faces"] == 0
+    assert rep["duplicate_faces"] == 0
+    assert rep["inconsistent_edges"] == 0
+    assert rep["nonmanifold_vertices"] == 0
+    assert rep["finite"] and rep["indices_in_range"] and rep["outward"]
+
+
+def test_a_pinched_vertex_survives_every_edge_count():
+    """
+    Two tetrahedra meeting at one point.
+
+    Every edge is still in exactly two triangles, so the mesh is watertight by
+    the only test that used to be applied to it. There is no edge to be
+    non-manifold: the defect is at a vertex, where the surface has two sides
+    and the slicer has to pick one.
+    """
+    v1, f1 = _tetrahedron([0, 0, 0])
+    v2, f2 = _tetrahedron([-1, 0, 0])                 # its vertex 1 lands on 0, 0, 0
+    v = np.concatenate([v1, np.delete(v2, 1, axis=0)])
+    f = np.concatenate([f1, np.array([[4, 0, 5, 6][i] for i in f2.ravel()]).reshape(-1, 3)])
+
+    rep = manifold_report(v, f)
+    assert rep["watertight"], "the pinch does not break a single edge pairing"
+    assert rep["nonmanifold_edges"] == 0
+    assert nonmanifold_vertices(f) == 1
+    # and the parity of the Euler characteristic is the free half of the same
+    # finding: two closed surfaces should sum to 4, not 3.
+    assert rep["euler"] % 2 == 1
+
+
+def test_a_flipped_triangle_closes_and_still_slices_wrong():
+    """
+    One face wound the other way. The mesh stays closed -- the edges are all
+    still shared by two triangles -- and three of them are now traversed twice
+    in the same direction, which is a patch of surface with its inside out.
+    """
+    v, f = _cube()
+    f[0] = f[0][::-1]
+    assert manifold_report(v, f)["watertight"]
+    assert inconsistent_edges(f) == 3
+
+
+def test_a_duplicated_face_is_named_as_one():
+    v, f = _cube()
+    doubled = np.concatenate([f, f[:1]])
+    assert duplicate_faces(doubled) == 1
+    assert duplicate_faces(f) == 0
+
+
+def test_a_zero_area_triangle_is_counted_not_ignored():
+    v, f = _cube()
+    v = np.concatenate([v, [[0.5, 0.0, 0.0]]])        # collinear with edge 0-1
+    f = np.concatenate([f, [[0, 1, 8]]])
+    assert slicing_report(v, f)["degenerate_faces"] == 1
+
+
+def test_an_inside_out_solid_is_refused():
+    v, f = _cube()
+    assert slicing_report(v, f[:, ::-1].copy())["outward"] is False
+
+
+def test_every_revolved_part_passes_the_slicing_gate(meshes):
+    for name, (v, f) in meshes.items():
+        rep = slicing_report(v, f)
+        assert rep["degenerate_faces"] == 0, name
+        assert rep["duplicate_faces"] == 0, name
+        assert rep["inconsistent_edges"] == 0, name
+        assert rep["nonmanifold_vertices"] == 0, name
+        assert rep["outward"], name
+
+
+def test_what_is_checked_is_what_reaches_the_file():
+    """
+    A sliver with area in memory and none on disk.
+
+    3MF carries coordinates as decimal text, so writing quantises. A triangle
+    whose corners are closer together than the written quantum has area right
+    up until it is written and none afterwards -- and checking the mesh in
+    memory and then writing it means the thing that was checked and the thing a
+    slicer opens are two different meshes. They were: the first print file
+    built with the level guard in place reported no zero-area triangles
+    anywhere in memory and came back off disk with 416.
+
+    Here vertex 8 sits a nanometre along the diagonal from vertex 0, which
+    splits the two faces meeting there into a pair of ordinary triangles and a
+    pair of slivers. Every area is positive. None of them survives six decimal
+    places.
+    """
+    import tempfile
+
+    from mesh_export import WRITE_DECIMALS, read_3mf, write_3mf
+    from print_ready import snap_to_the_written_grid
+
+    v, f = _cube()
+    v = np.concatenate([v, [v[0] + 1e-9 * (v[2] - v[0])]])
+    keep = [row for row in f.tolist() if row not in ([0, 3, 2], [0, 2, 1])]
+    f = np.array(keep + [[0, 3, 8], [8, 3, 2], [0, 8, 1], [8, 2, 1]])
+
+    assert manifold_report(v, f)["watertight"]
+    assert manifold_report(v, f)["degenerate_faces"] == 0, "every area is positive here"
+    assert manifold_report(np.round(v, WRITE_DECIMALS), f)["degenerate_faces"] == 2, (
+        "and two of them are gone the moment the file is written")
+
+    sv, sf = snap_to_the_written_grid(v, f)
+    rep = manifold_report(sv, sf)
+    assert rep["watertight"], "the weld must not open the surface"
+    assert rep["boundary_edges"] == 0
+    assert rep["degenerate_faces"] == 0, "the slivers are gone, not merely rounded"
+
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "snapped.3mf")
+        write_3mf(path, {"cube": (sv, sf)})
+        got_v, got_f = read_3mf(path)["objects"]["cube"]
+    assert np.array_equal(got_v, sv), "the file must carry what was checked"
+    assert np.array_equal(got_f, sf)
+    assert manifold_report(got_v, got_f)["degenerate_faces"] == 0

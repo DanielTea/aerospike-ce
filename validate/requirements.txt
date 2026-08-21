@@ -7,3 +7,7 @@ numpy>=1.26
 # even collect.
 scipy>=1.11
 scikit-image>=0.22
+
+# print_ready.py and export_cooled.py both decimate. Without this the
+# reduction step raises and no print file gets written at all.
+fast_simplification>=0.1

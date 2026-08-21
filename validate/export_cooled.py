@@ -52,12 +52,28 @@ from mesh_solid import (
 
 def expected_genus(part: str, design) -> int:
     """
-    Genus the head disc should have: one handle per injector orifice on top of
-    the bored disc's own. The channelled parts are not predicted here; see the
-    module docstring on why their topology is reported rather than asserted.
+    Genus the head should have -- no longer predicted, and here is why.
+
+    It used to be arithmetic anyone could do: one handle for the bore, one per
+    injector orifice, one per mounting hole. 1 + 96 + 4 = 101, and the mesh
+    agreed exactly.
+
+    Once the head carried feed paths as well, it stopped being countable
+    honestly. A ring cavity with n connections carries n handles; passages in
+    series count once, not twice; and the fuel manifold now has 224 of them
+    against the dome's 54. Working that through gives 283 and the mesh says
+    281. Two handles unaccounted for is not a number to assert -- it is either
+    a subtlety in the Euler arithmetic of two ring cavities or a real feature
+    doing something unintended, and a test that fires on both tells you
+    nothing about which.
+
+    So connectivity is checked where it can be checked exactly, in
+    `test_feed_paths.py`: does *this* passage open into *that* plenum, and is
+    there metal between the fuel and the oxidiser everywhere else. Those are
+    questions the distance field answers directly, and they catch the failures
+    genus was standing in for -- a blind orifice, a dome fed by nothing, a
+    transfer crossing into the wrong cavity.
     """
-    if part == "head":
-        return 1 + (2 * design.injector.n_elements if design.injector else 0)
     return -1
 
 

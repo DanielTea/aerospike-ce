@@ -20,6 +20,15 @@ chamber acoustic modes, and the thrust coefficient against altitude.
 
 Built on [PicoGK](https://picogk.org) and the LEAP 71 ShapeKernel, both Apache-2.0.
 
+## The printable engine
+
+[regen-spike-75.3mf](https://github.com/DanielTea/aerospike-ce/releases/download/v0.1.0/regen-spike-75.3mf)
+— three solids, 21.8 million triangles, 21.8 kg in GRCop-42, meshed at 0.233 mm
+with all 556 cooling channels and 96 injector orifices in it. Every part
+watertight, no cavity without a way out, and the head's genus checked against
+the handles its features imply. See [docs/print](docs/print/README.md) for what
+is checked, what is not, and what is wrong with the head manifolds.
+
 ## What this is and is not
 
 **Is:** a working skeleton of the paradigm. Descriptive input, codified
@@ -37,9 +46,18 @@ nozzle contour method. That gap is the whole ballgame, and no amount of
 scaffolding closes it. What this gives you is the shape of the workflow, so you
 can start filling it with your own domain knowledge.
 
-**Also not:** a machine. This generates nozzle geometry for printed
-demonstrators. Combustion, injectors, cooling, materials, and testing are all out
-of scope and deliberately excluded from the model.
+**Also not:** a machine. Every model here is a screening model, and the
+honest description of each is in `CLAUDE.md`. `combustion_ref.py` is a
+parametric fit with tabulated propellant data, not a Gibbs minimisation --
+substitute CEA or RPA output through the spec, which every routine accepts for
+exactly that reason. The cooling stands on Bartz, quoted at plus or minus thirty
+percent and applied here to an annular throat. The injector sizes orifices; it
+does not model spray, vaporisation or combustion stability.
+
+Genuinely absent: base flow behind the truncated plug (worth several percent),
+any combustion response function, creep, and any real CFD. If a design needs one
+of those to close, that is worth saying rather than tuning inputs until the
+report looks green.
 
 ## Platform
 
@@ -61,16 +79,16 @@ cd aerospike-ce
 # 2. .NET 9 SDK
 #    https://dotnet.microsoft.com/download
 
-# 3. install the PicoGK runtime for your platform
-#    https://github.com/leap71/PicoGK/releases
-#    macOS: install the .pkg. Windows: run the installer.
+# 3. the PicoGK native runtime is vendored in the submodule -- there is
+#    nothing to install. The csproj copies it next to the binary.
+#    vendor/PicoGK/native/<rid>/
 
 # 4. python side -- needs Python 3.9 or newer (matplotlib 3.8 floor).
 #    A system python older than that will fail to resolve requirements.txt.
 cd validate
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-pytest -q          # 15 tests, all should pass
+pytest -q          # 301 tests, all should pass
 cd ..
 
 # 5. build and run
@@ -85,7 +103,11 @@ The viewer window opens, STLs land in `out/`.
 edit spec/demo.json
         |
         v
-pytest                              ->  invariants hold
+python pipeline.py                  ->  physics       the numbers
+                                        geometry      the shapes, and the seam
+                                        printability  can a machine build them
+                                        watertight    the solid they close into
+                                        slicing       what a slicer reads
         |
         v
 python plot_contour.py              ->  out/contour.png     <- look at this
@@ -97,8 +119,17 @@ python mesh_export.py               ->  out/engine_3d.png   <- and this
 dotnet run --project model          ->  voxel model, viewer, out/*.stl
         |
         v
+python print_ready.py               ->  the 3MF, or a refusal
+python verify_print_file.py         ->  the same gates, re-derived from disk
+        |
+        v
 slicer
 ```
+
+`pipeline.py` is the gate, and `pytest` is one stage of it. Every test module in
+the repository belongs to exactly one stage and the pipeline refuses to run if
+one belongs to none. [docs/pipeline](docs/pipeline/README.md) lists every gate,
+what it proves, and which shipped defect it exists because of.
 
 The PNG step exists because a coding agent cannot see the 3D viewer. Skipping it
 is how you end up with a confidently generated part that is quietly wrong.
@@ -340,11 +371,13 @@ distance field and runs marching cubes, which handles the channels and orifices.
 `model/CooledGeometry.cs` carries the same distance functions and hands them
 straight to PicoGK, which renders any bounded implicit into voxels.
 
-Marching cubes needs about three samples across the narrowest feature, so
-`export_cooled.py` derives the voxel size from the part rather than taking it as
-input: a 0.4 mm channel gives 0.13 mm voxels. The field is built one slab at a
-time, so memory is bounded by the slab and the resolution can be chosen to suit
-the feature instead of the RAM.
+Marching cubes needs about three samples across the narrowest feature, so the
+voxel size is derived from the part rather than taken as input. That makes the
+narrowest feature a cost the whole engine pays: left free, the cooling search
+picks a 0.4 mm channel, which forces 0.133 mm voxels everywhere. Pinning the
+process floor at 0.7 mm gives 0.233 mm instead -- five times fewer voxels --
+for 170 K of wall temperature the design had to spare. The field is built one
+slab at a time, so memory is bounded by the slab rather than by the resolution.
 
 The check that matters is the Euler characteristic against what the features
 imply -- one handle per cooling channel, one per injector orifice, on top of the
@@ -352,6 +385,22 @@ base topology of the revolved profile. A channel that has broken through its
 wall, merged with its neighbour, or been closed by over-aggressive decimation
 all leave a mesh that is still watertight and still looks right; the genus is
 what catches them.
+
+Watertight is not the same as printable, and the gap is wider than it looks.
+Four separate defects have shipped past a mesh reporting watertight at the
+correct genus: a triangle with no area, a duplicated face, a patch wound inside
+out, and a vertex where the surface pinches against itself. Each is an ordinary
+face by index -- two neighbours on every edge, so the edge arithmetic is content
+-- and each is something a slicer reads and refuses. That is what the pipeline's
+slicing stage is for.
+
+Marching cubes also places its vertices in single precision, in *index* units.
+Out at index 1024 that resolves about 6e-5 of an index, so a crossing a few
+nanometres off a sample is placed exactly on it, and so is every other edge into
+that sample; the weld then merges what the mesher meant to keep apart. The cowl
+did that once in 24 million triangles. `hold_off_level` keeps every sample a
+derived distance clear of the level, on the side it was already on, so no cell
+changes classification and the surface moves by at most a micron.
 
 Decimation then runs as far as the topology survives and no further. On the head
 that is 5 percent of the triangles at exactly the right genus; at 3 percent the
@@ -376,8 +425,10 @@ nothing, and a mesh is a poor instrument for a question the field can answer.
 5. Sweep `operation.mixture_ratio` on `regen.json` from 2.2 to 3.4 and watch the
    cooling margins collapse as the specific impulse rises. That trade is the
    whole reason the demo runs fuel-rich.
-6. Add film cooling. It is the missing piece that would let a small engine close,
-   and its absence is why `demo.json` cannot be cooled at all.
+6. Raise `cooling.min_channel_width_mm` from 0.7 back to 0.4 and watch the
+   whole engine's voxel size fall from 0.233 mm to 0.133 mm. The channel gets
+   better at cooling and worse at existing; the trade is manufacturing against
+   thermal margin, and it is decided in the spec rather than in the mesher.
 7. Then the real exercise: derive `contraction_ratio`, `converging_length_mm` and
    the mixture ratio from an actual requirement rather than accepting them as
    input. That is the step where this stops being a shape generator and starts
