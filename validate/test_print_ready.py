@@ -108,15 +108,15 @@ def test_the_cavity_volume_is_reported_at_its_true_size():
     assert trapped == pytest.approx(4.0 / 3.0 * np.pi * 4.0 ** 3, rel=0.03)
 
 
-def test_decimation_walks_from_mild_to_aggressive(monkeypatch):
+def test_decimation_opens_at_the_target(monkeypatch):
     """
-    The ladder is tried gentlest first and stops at the target.
+    The hardest rung is tried first, and when it works nothing else is tried.
 
-    Written the other way round -- skip everything gentler than the target,
-    open with the target itself -- a part that cannot survive an eight-fold
-    collapse keeps every one of its triangles, because the one ratio that was
-    tried failed and there was nothing milder left to fall back to. The
-    centrebody did exactly that: 16.4 million triangles in, 16.4 million out.
+    A probe is a collapse and a full topology check, which on a
+    24-million-triangle part is a couple of minutes. Walking up from 0.85 to
+    arrive at 0.12 pays that eleven times over to reach where one probe would
+    have -- and the ladder only walked at all because it used to break at the
+    first failure, back when the collapser was hurrying and failed early.
     """
     import print_ready
 
@@ -127,14 +127,81 @@ def test_decimation_walks_from_mild_to_aggressive(monkeypatch):
 
     def spy(verts, faces, ratio):
         tried.append(ratio)
-        return verts, faces          # refuse to actually reduce anything
+        return verts, faces          # unchanged, so every check below passes
 
     monkeypatch.setattr(print_ready, "decimate", spy)
     print_ready.reduce_safely(v, f, target_ratio=0.12)
 
-    assert tried == sorted(tried, reverse=True), "ladder is not mildest-first"
-    assert tried[0] == 0.85
-    assert min(tried) == 0.12, "ladder went past the requested target"
+    assert tried == [0.12], f"probed rungs it did not need: {tried}"
+
+
+def test_decimation_falls_back_up_when_the_target_fails(monkeypatch):
+    """
+    A part that cannot survive an eight-fold collapse still gets a halving.
+
+    This is the failure the ladder was written mildest-first to avoid: open
+    with the target, fail, give up, and ship every triangle. The centrebody did
+    exactly that -- 16.4 million in, 16.4 million out. Opening with the target
+    is only safe because failure now walks back up towards the mild end
+    instead of stopping.
+    """
+    import print_ready
+
+    from mesh_solid import decimate as real_decimate
+
+    r = _radius()
+    v, f = _mesh(r - 8.0)
+
+    tried = []
+
+    def spy(verts, faces, ratio):
+        tried.append(ratio)
+        if ratio >= 0.5:
+            return real_decimate(verts, faces, ratio)
+        # Below 0.5, hand back something that is no longer closed. A real
+        # quadric collapse fails this way too: it shuts a cooling channel and
+        # the result is still a perfectly plausible-looking mesh.
+        return verts, faces[: len(faces) // 2]
+
+    monkeypatch.setattr(print_ready, "decimate", spy)
+    _, out, rep = print_ready.reduce_safely(v, f, target_ratio=0.12)
+
+    assert tried[0] == 0.12, "did not open at the target"
+    assert tried == sorted(tried), "did not walk back up towards the mild end"
+    assert max(tried) == 0.5, "kept probing past the rung that worked"
+    assert rep["watertight"], "returned the mesh that failed the check"
+    assert len(out) < len(f), "gave up instead of falling back"
+
+
+def test_the_deviation_budget_stops_the_ladder():
+    """
+    Topology is necessary and not sufficient.
+
+    A decimated mesh can keep every handle, every component and its volume to
+    three decimals while the surface drifts onto the chords of the curves it
+    spanned -- decimation takes as much off one side as it adds to the other,
+    so the volume never notices. Only distance notices, so the ladder measures
+    it, and a budget that allows nothing has to keep more triangles than one
+    that allows a millimetre.
+    """
+    import print_ready
+    from mesh_solid import SURFACE_BIAS_MM
+
+    v, f = _mesh(_radius() - 8.0)
+    # The ball this was meshed from, as a field: marching_cubes puts the grid
+    # corner at the origin, so the centre lands at +half on every axis.
+    centre = np.array([12.0, 12.0, 12.0])
+
+    def sample(points):
+        return (np.linalg.norm(np.asarray(points) - centre, axis=1) - 8.0
+                + SURFACE_BIAS_MM)
+
+    loose = print_ready.reduce_safely(v, f, 0.05, sample=sample, budget_mm=1.0)
+    tight = print_ready.reduce_safely(v, f, 0.05, sample=sample, budget_mm=1e-9)
+
+    assert len(loose[1]) < len(f), "the loose budget decimated nothing at all"
+    assert len(tight[1]) > len(loose[1]), \
+        "a budget allowing no drift kept no more triangles than one allowing a mm"
 
 
 def test_decimation_keeps_the_last_mesh_that_passed(monkeypatch):

@@ -110,7 +110,9 @@ Runs `test_mesh`, then meshes each part and asks:
 | euler is even | two closed orientable surfaces sum to an even Euler characteristic, so an odd one **proves** the surface meets itself | an even number of pinches |
 | is one solid | exactly one positive-volume surface: no fragment attached to nothing | |
 | cavities drain | no negative-volume surface: no cavity that stays full of powder | |
-| volume | the mesh and the field agree, by two different routes through the same field | |
+| volume | the mesh and the field agree, by two different routes through the same field | a surface that drifted without changing volume |
+| follows the field | no point on the mesh is further from the field than two voxels | gross breakage only; see below |
+| keeps its shape | the mean distance from the field is under an eighth of a voxel | |
 
 The volume gate is read as a length, not a percentage. The difference between
 the divergence-theorem volume of the triangles and the occupancy integrated
@@ -119,6 +121,42 @@ that would account for it; that is the quantity that has to be small against
 the voxel. A percentage is not comparable between a solid disc and a part with
 392 channels in it, and a real loss — a dropped slab, a region meshed inside
 out — is a whole feature, orders above the bound either way.
+
+The last two gates exist because volume is a single number over a whole part
+and a mesh can hold it exactly while the shape drifts. Decimation moves
+triangles onto the chords of the curves they spanned, which takes as much off
+one side as it adds to the other; the volume never notices and neither does the
+genus. So the distance is asked directly, at the vertices and across the faces,
+against the same field the volume came from.
+
+Both bounds scale with the **voxel**, because that is what sets how far a mesh
+can be from its field: marching cubes places a vertex on a lattice edge and
+cannot get closer than the lattice allows. A screening mesh at 0.6 mm is
+legitimately 400 µm out and a print mesh at 0.233 mm is 195 — same geometry,
+same mesher, no defect in either. Bounding by the feature size instead fails
+every screening run, which is exactly what it did on the first attempt. A
+written file carries no voxel, so it is held to the one the features demand;
+that is not an assumption about the file, it is the claim the file makes by
+existing.
+
+They are read differently on purpose. Marching cubes cannot put a vertex inside
+a sharp concave corner, so the worst point on any faithful mesh is about a voxel
+out — the undecimated cowl reads 195 µm and reads 195 µm again after a ten-fold
+decimation. The maximum is kept, loosely, to catch gross breakage; the **mean**
+is what moves: 12 µm undecimated, 18 µm at the decimation floor. That is the
+number that would notice a part quietly going faceted. Swell one part by 50 µm
+and every other gate in this stage passes — it closes, one solid, no sealed
+void, right genus — and only the mean says so.
+
+Both are lower bounds rather than guarantees, and the reason is worth knowing:
+the field is composed with `min` and `max`, and the maximum of two distance
+functions is not a distance function — outside a concave seam it reads short.
+The measurement is tight over the smooth ground decimation actually changes and
+optimistic in the corners.
+
+Unlike the resolution gate, these two **can** be asked of a written file, and
+they are the questions worth asking of one: not what voxel it claims to have
+been built at, but how far from the engine it actually is.
 
 ## Stage 5 — slicing
 

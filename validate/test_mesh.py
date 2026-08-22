@@ -412,3 +412,131 @@ def test_what_is_checked_is_what_reaches_the_file():
     assert np.array_equal(got_v, sv), "the file must carry what was checked"
     assert np.array_equal(got_f, sf)
     assert manifold_report(got_v, got_f)["degenerate_faces"] == 0
+
+
+# --------------------------------------------------------------------------
+# the field, asked away from the lattice
+# --------------------------------------------------------------------------
+#
+# build_field answers on a grid, which is all the mesher ever needed. Asking a
+# mesh how far it has drifted from the surface it claims to be is a question
+# about points that are nowhere near a lattice, so the composition moved into
+# sample_field and both callers go through it. These prove the move did not
+# change the answer, and that the drift it now measures is the real distance.
+
+def _test_part():
+    """A stub with one of everything the composition can subtract."""
+    from engine_ref import Profile
+    from mesh_solid import HoleCut
+
+    # A cylinder 20 mm long and 8 mm in radius, wound counter-clockwise in
+    # (x, r), drilled by a ring of six 1.5 mm holes running right through it.
+    prof = Profile(name="stub",
+                   x=np.array([0.0, 20.0, 20.0, 0.0]),
+                   r=np.array([0.0, 0.0, 8.0, 8.0]))
+    holes = [HoleCut(radius_mm=5.0, diameter_mm=1.5, count=6,
+                     x_start=-1.0, x_end=21.0, name="test")]
+    return prof, dict(holes=holes)
+
+
+def test_the_scattered_sampler_agrees_with_the_grid_builder():
+    """
+    Same composition, two callers, one answer.
+
+    The grid path runs in float32 and the scattered path in float64, so they
+    are allowed to differ by float32's own resolution and by nothing else. A
+    real divergence here would mean the mesher and the gate that checks it had
+    started describing different solids -- which is the failure the seam
+    between them exists to prevent.
+    """
+    from mesh_solid import build_field, part_sampler
+
+    prof, feats = _test_part()
+    field, origin, voxel = build_field(prof, voxel_mm=0.6, **feats)
+
+    # The grid is the origin plus whole voxels, which is the only
+    # reconstruction that can be right: a field whose returned spacing is not
+    # the spacing it was built on cannot be sampled again by anyone.
+    nx, ny, nz = field.shape
+    xs = origin[0] + np.arange(nx) * voxel
+    ys = origin[1] + np.arange(ny) * voxel
+    zs = origin[2] + np.arange(nz) * voxel
+    X, Y, Z = np.meshgrid(xs, ys, zs, indexing="ij")
+    pts = np.c_[X.ravel(), Y.ravel(), Z.ravel()]
+
+    got = part_sampler(prof, **feats)(pts).reshape(field.shape)
+    assert np.abs(got - field).max() < 1e-3, "the two paths describe different solids"
+
+
+def test_deviation_reads_zero_on_the_surface_and_the_offset_off_it():
+    """
+    The measurement has to be the distance, not a proxy for it.
+
+    A sphere meshed from its own field sits on that field, so it reads the
+    level and nothing more. Push every vertex out by a tenth of a millimetre
+    and it has to read a tenth of a millimetre -- otherwise a gate built on it
+    would pass a mesh that had drifted exactly that far.
+    """
+    from mesh_solid import SURFACE_BIAS_MM, field_deviation
+    from skimage.measure import marching_cubes
+
+    n, half = 48, 12.0
+    h = 2.0 * half / (n - 1)
+    g = np.linspace(-half, half, n)
+    X, Y, Z = np.meshgrid(g, g, g, indexing="ij")
+    v, f, _, _ = marching_cubes(np.sqrt(X ** 2 + Y ** 2 + Z ** 2) - 8.0,
+                                level=SURFACE_BIAS_MM, spacing=(h, h, h))
+    centre = np.array([half, half, half])
+
+    def sample(p):
+        return (np.linalg.norm(np.asarray(p) - centre, axis=1) - 8.0
+                + SURFACE_BIAS_MM)
+
+    on = field_deviation(v, f, sample)
+    # Marching cubes is linear along an edge and a sphere is not, so the
+    # centres of the triangles sit measurably inside it. That is the mesher's
+    # error and it scales with the voxel; what matters is that it is a
+    # fraction of one and not a multiple.
+    assert on["max_mm"] < h, f"a mesh on its own field reads {on['max_mm']:.3f} mm out"
+
+    outward = v - centre
+    outward /= np.linalg.norm(outward, axis=1)[:, None]
+    off = field_deviation(v + 0.1 * outward, f, sample)
+    assert off["rms_mm"] == pytest.approx(0.1, abs=0.02), \
+        "a mesh pushed a tenth of a millimetre off the surface did not say so"
+
+
+def test_deviation_looks_hardest_where_the_triangles_are_biggest():
+    """
+    The budget is spent where chordal error lives.
+
+    Half the sample is a stride over the whole mesh and half goes to the
+    largest triangles, because a collapse leaves its surviving corners exactly
+    on the surface and the flat triangle between them cutting the corner off
+    whatever curve they spanned. Move one big triangle's corner and the
+    measurement has to notice, even though it is one face in thousands.
+    """
+    from mesh_solid import SURFACE_BIAS_MM, field_deviation
+    from skimage.measure import marching_cubes
+
+    n, half = 48, 12.0
+    h = 2.0 * half / (n - 1)
+    g = np.linspace(-half, half, n)
+    X, Y, Z = np.meshgrid(g, g, g, indexing="ij")
+    v, f, _, _ = marching_cubes(np.sqrt(X ** 2 + Y ** 2 + Z ** 2) - 8.0,
+                                level=SURFACE_BIAS_MM, spacing=(h, h, h))
+    centre = np.array([half, half, half])
+
+    def sample(p):
+        return (np.linalg.norm(np.asarray(p) - centre, axis=1) - 8.0
+                + SURFACE_BIAS_MM)
+
+    before = field_deviation(v, f, sample)["max_mm"]
+    moved = v.copy()
+    # Drag one vertex a millimetre off the surface, which also makes the faces
+    # around it the largest in the mesh.
+    moved[f[0, 0]] += (moved[f[0, 0]] - centre) / np.linalg.norm(
+        moved[f[0, 0]] - centre)
+    after = field_deviation(moved, f, sample)["max_mm"]
+    assert after > before + 0.5, \
+        f"a vertex a millimetre out went unnoticed ({before:.3f} -> {after:.3f})"

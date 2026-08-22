@@ -4,6 +4,11 @@ A checked, print-resolution model of the whole engine: three solids in one 3MF,
 dimensioned in millimetres, with every cooling channel, injector orifice and
 mounting hole in it.
 
+It is written twice. `regen-spike-75.3mf` is the reference -- every triangle
+marching cubes produced, kept -- and `regen-spike-75-compact.3mf` is the same
+engine at a tenth of them, because a slicer that has to open half a gigabyte
+usually does not.
+
 > **The published v0.1.0 asset is superseded.** It was built before the slicing
 > gates existed and carries **6,334 triangles with no area** -- 793 on the
 > centrebody, 5,300 on the cowl, 241 on the head. Every part in it is watertight
@@ -12,17 +17,19 @@ mounting hole in it.
 > nothing in the gate at the time could see it. A slicer can, and reports it as
 > missing or extraneous surfaces. Rebuild rather than download it.
 
-It is not a file in the tree. It is 409 MB, GitHub refuses a single file over
-100, and a generated artifact of that size does not belong in history anyway:
-the thing worth versioning is the generator, which is here.
+Neither is a file in the tree. GitHub refuses a single file over 100 MB, and a
+generated artifact does not belong in history anyway: the thing worth versioning
+is the generator, which is here.
 
 **Download:** the latest green run of the
 [`print file` workflow](https://github.com/DanielTea/aerospike-ce/actions/workflows/print-file.yml)
-carries it as an artifact named `print-file`. The job builds it, runs the
-release gate on the written file, and only then uploads, so anything on that
-page passed its own checks; a run whose gate failed has a `release-report`
-saying why and no print file at all. Artifacts keep for 30 days, and rebuilding
-is one button.
+carries them as two artifacts, `print-file` and `print-file-compact` -- separate
+rather than one archive holding both, because the whole reason the compact file
+exists is that someone did not want to download the full one. The job builds
+them, runs the release gate on each **written file** separately, and only then
+uploads, so anything on that page passed its own checks; a run whose gate failed
+has a `release-report` saying why and no print file at all. Artifacts keep for
+30 days, and rebuilding is one button.
 
 A release asset would do the same job, and is the better home once there is a
 version worth naming; the workflow exists because it needs no permission to
@@ -41,16 +48,55 @@ Build it locally with:
 ```bash
 cd validate
 python print_ready.py --spec ../spec/regen.json --out ../docs/print
-python pipeline.py --file ../docs/print/regen-spike-75.3mf --json ../out/release.json
+for f in ../docs/print/*.3mf; do
+  python pipeline.py --file "$f" --json "../out/release-$(basename "$f" .3mf).json"
+done
 ```
 
-The first command builds it, refusing to write rather than writing something
+Both files come out of one meshing -- the expensive part is shared -- and take
+about an hour together on four cores. `--tier full` or `--tier compact` writes
+one of them, which is worth knowing when iterating: the compact tier is the
+slower of the two, because when a part cannot take the hardest rung the ladder
+has to walk back up to find the one it can.
+
+The first command builds them, refusing to write rather than writing something
 plausible. The second is the release gate: it reopens the file as a stranger
 would and re-derives every property from what is on disk, across all five
 stages. Checking the meshes in memory and then writing them leaves the writer
 -- the part a slicer actually sees -- unchecked, and that gap is not
 theoretical: it hid 416 zero-area triangles in the first build of this file
 that had none in memory.
+
+## Two files, one engine
+
+Both are meshed from the same field at the same voxel and go through the same
+five stages. The only thing that differs is how much shape error decimation was
+allowed to spend, measured as rms distance from the surface the field defines:
+
+| | decimation | triangles | size | rms from the field |
+|---|---|---|---|---|
+| `regen-spike-75.3mf` | none | 51,429,650 | 531 MB | 5.5 – 11.7 µm |
+| `regen-spike-75-compact.3mf` | to the floor, within 12 µm | 5,488,032 | 72 MB | 12.1 – 18.4 µm |
+
+The reference decimates by nothing at all, deliberately. Any ratio is a
+judgement about how much fidelity is worth how many megabytes, and the point of
+having a reference is that no such judgement has been made in it. Measuring says
+a tenth of it costs 1.4 µm of added rms drift against a mesher whose own error
+is 11.7 µm -- a perfectly good trade, and still a trade. The compact file is
+where trades are made, and it says so on the label.
+
+Twelve microns is a third of a layer at 30 µm and a fiftieth of the thinnest
+wall in the engine, so the compact file is the same part *to a printer*. It is
+not the same part to a measuring machine, which is why both exist. Print either;
+inspect against the first.
+
+What it is **not** is a coarser mesh of a coarser model. The voxel is the same
+0.233 mm in both, set by the 0.70 mm hot wall, and dropping it would not make a
+smaller printable file -- it would shred the channels into fragments and the
+watertight stage would refuse the result. Every triangle removed here was
+removed by quadric collapse and then checked: same genus, same component count,
+same volume, no zero-area faces, and the distance from the field measured
+rather than assumed.
 
 ## What is in it
 
@@ -59,14 +105,22 @@ watertight, no boundary or non-manifold edges, no cavity without a way out, no
 zero-area triangle, no duplicated face, no patch wound inside out and no vertex
 where the surface pinches -- checked on the grid the file is written on.
 
-| part | triangles | genus | volume | mass | decimation |
-|---|---|---|---|---|---|
-| centrebody | 8,221,176 | 328 | 402.49 cm3 | 3.524 kg | keep 0.50 |
-| cowl | 20,357,084 | 393 | 392.84 cm3 | 3.440 kg | keep 0.85 |
-| head | 7,726,426 | 281 | 1574.58 cm3 | 13.787 kg | keep 0.70 |
+| part | full (as meshed) | compact | keep | genus | volume | mass |
+|---|---|---|---|---|---|---|
+| centrebody | 16,442,380 | 1,731,072 | 0.02 | 328 | 402.49 cm3 | 3.524 kg |
+| cowl | 23,949,512 | 2,873,940 | 0.12 | 393 | 392.84 cm3 | 3.440 kg |
+| head | 11,037,758 | 883,020 | 0.08 | 281 | 1574.58 cm3 | 13.787 kg |
 
-36,304,686 triangles, 20.75 kg, 409 MB. The equivalent binary STL would be
-1815 MB, and would not say what unit it was in.
+51,429,650 triangles at 531 MB, or 5,488,032 at 72 MB. 20.75 kg either way --
+the volumes agree to two decimal places in cm3, which is what "the same engine"
+has to mean before anything else is claimed. The equivalent binary STL would be
+2571 MB, and would not say what unit it was in.
+
+The compact file stops at the lowest rung each part can take. The cowl stops
+highest because it is the part carrying 392 channels: asked for 0.02 it fails,
+and the ladder walks back up through 0.03, 0.05 and 0.08 until the genus, the
+component count, the volume and the distance from the field all survive at
+0.12.
 
 Vertices are written to six decimal places -- a nanometre -- rather than four,
 and the mesh is snapped onto that grid and welded there *before* it is checked.
@@ -117,10 +171,17 @@ and `slicing` stages:
 - **Decimation that stops.** Quadric collapse reads a sub-millimetre channel as
   noise against a smooth wall and closes it, leaving a mesh that is still
   watertight and still looks like an engine. Every step is checked against the
-  topology and the volume, and the result is the last one that survived.
+  topology, the volume and the distance from the field, and the result is the
+  hardest rung that survived all three.
+- **Distance from the field.** Everything above can pass while the shape drifts:
+  decimation moves triangles onto the chords of the curves they spanned, taking
+  as much off one side as it adds to the other, so the volume never notices. The
+  mesh is asked directly how far it is from the surface the field defines -- at
+  its vertices and across its faces -- and the mean is the number that moves.
 
 The slicing gates are there because the first published file did not have them.
-It carried 6,334 triangles with no area -- 0.017 percent of 36.3 million, and
+It carried 6,334 triangles with no area -- 0.017 percent of the 36.3 million it
+had then, and
 enough for a slicer to report missing surfaces -- through a build that reported
 every part watertight at the right genus. A zero-area triangle contributes no
 volume, breaks no edge pairing and changes no Euler characteristic; there was
